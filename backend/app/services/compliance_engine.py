@@ -399,21 +399,33 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
                         result = "ManualReviewRequired"
                         notes = "Unverified calibration: physical font size cannot be determined reliably."
                     else:
-                        mm_per_px_y = calibration.get("mm_per_px_y") or 0.1
+                        mm_per_px_y = calibration.get("mm_per_px_y")
                         bboxes = scan_context.get("bounding_boxes") or []
-                        font_pass = True
-                        if bboxes:
+                        if not isinstance(mm_per_px_y, (int, float)) or mm_per_px_y <= 0 or not bboxes:
+                            result = "ManualReviewRequired"
+                            notes = "Calibration lacks a measured scale or localized text; officer review required."
+                            mm_per_px_y = None
+                        else:
+                            font_pass = True
                             for b in bboxes:
-                                h_px = b.get("bbox", [0, 0, 0, 0])[3] if isinstance(b.get("bbox"), list) and len(b.get("bbox")) >= 4 else 0
-                                h_mm = h_px * mm_per_px_y
-                                if h_mm < 1.0:
+                                raw_bbox = b.get("bbox") if isinstance(b, dict) else None
+                                if isinstance(raw_bbox, dict):
+                                    h_px = float(raw_bbox.get("y_max", 0)) - float(raw_bbox.get("y_min", 0))
+                                elif isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) >= 4:
+                                    h_px = float(raw_bbox[3])
+                                else:
+                                    result = "ManualReviewRequired"
+                                    notes = "Font declaration has no genuine localized bounding box; officer review required."
+                                    font_pass = None
+                                    break
+                                if h_px * mm_per_px_y < 1.0:
                                     font_pass = False
                                     break
-                        if font_pass:
-                            result = "Pass"
-                        else:
-                            result = "Fail"
-                            notes = "Font size below minimum prescribed height under Rule 7."
+                            if font_pass is True:
+                                result = "Pass"
+                            elif font_pass is False:
+                                result = "Fail"
+                                notes = "Font size below minimum prescribed height under Rule 7."
 
             # ── CheckType: StandardSize ──────────────────────────────────────
             elif check_type == "StandardSize":
@@ -441,7 +453,8 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
                             result = "Fail"
                             notes = f"Pack size '{net_qty_val}' is not a prescribed standard size under the Second Schedule / Fifth Schedule."
                     else:
-                        result = "Pass"
+                        result = "ManualReviewRequired"
+                        notes = "Net quantity could not be parsed for standard-size verification."
 
             # ── CheckType: Symbol ────────────────────────────────────────────
             elif check_type == "Symbol":

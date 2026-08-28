@@ -45,6 +45,12 @@ def upload_file(client: TestClient, headers: dict) -> "Response":
 # ─── 1. Unauthenticated access ─────────────────────────────────────────────────
 
 class TestUnauthenticated:
+    def test_scan_status_requires_auth(self, client: TestClient):
+        assert client.get("/scan/does-not-exist/status").status_code == 401
+
+    def test_reports_require_auth(self, client: TestClient):
+        assert client.get("/reports/scan/does-not-exist").status_code == 401
+
     def test_upload_requires_auth(self, client: TestClient):
         """POST /scan/upload without a token → 401."""
         resp = client.post(
@@ -139,6 +145,10 @@ class TestAnalystRestrictions:
         """Analyst CAN GET /scan/ (they see all scans, just can't upload)."""
         resp = client.get("/scan/", headers=auth_headers(analyst_user))
         assert resp.status_code == 200
+
+    def test_analyst_status_route_is_authenticated(self, client: TestClient, analyst_user: User):
+        resp = client.get("/scan/does-not-exist/status", headers=auth_headers(analyst_user))
+        assert resp.status_code == 404
 
 
 # ─── 4. Controller permissions ────────────────────────────────────────────────

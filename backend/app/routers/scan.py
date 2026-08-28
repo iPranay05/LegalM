@@ -194,8 +194,10 @@ def get_scan_status(
     current_user: User = Depends(get_current_user),
 ):
     """Lightweight endpoint returning scan processing status for polling."""
-    scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+    scan = scope_scans_for_user(db.query(Scan), current_user, db).filter(Scan.scan_id == scan_id).first()
     if not scan:
+        if db.query(Scan).filter(Scan.scan_id == scan_id).first():
+            raise HTTPException(status_code=403, detail="Not authorised to view this scan")
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
 

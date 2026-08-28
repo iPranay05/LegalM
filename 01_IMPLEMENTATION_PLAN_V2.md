@@ -244,13 +244,13 @@ Re-stating the v1 plan's seven principles, now scored against this repository's 
 
 | # | Principle | Current state | Closed by |
 |---|---|---|---|
-| 1 | Three/five-outcome, never binary | **Violated** — `is_compliant` boolean + 80% threshold | §2 |
-| 2 | Regulatory content is data, not code | **Violated** — `COMPLIANCE_FIELDS` is a static hardcoded list; `Rule` table exists but is unused | §3 |
-| 3 | Compliance results are frozen facts | **Partially violated** — no `ComplianceCheck`-equivalent table exists at all; `Product.is_compliant` is mutated in place on every scan | §2.2, §3.2 |
-| 4 | Scans are append-only | **Holds** — `Scan` rows are created fresh per upload, never updated in place for re-scans | No fix needed |
-| 5 | Reports are immutable | **Holds** — `superseded_by_report_id` chain is correctly implemented | No fix needed (extend for evidence embedding, §6) |
-| 6 | RBAC enforced server-side, everywhere | **Violated** — multiple unauthenticated/unscoped routes, open self-registration | §4 |
-| 7 | Never fabricate certainty | **Violated** — hardcoded `confidence: 95.0`, synthetic `bbox: None` presented as if real, and font-size calibration computed but never consulted | §2.2 point 4, §6.2, §3.4 |
+| 1 | Three/five-outcome, never binary | **Verified closed** — engine outcomes and manual-review precedence are directly asserted in [`test_compliance_engine.py`](backend/tests/unit/test_compliance_engine.py) and [`test_rule_resolution.py`](backend/tests/unit/test_rule_resolution.py). | Verified by tests |
+| 2 | Regulatory content is data, not code | **Verified closed** — category-aware/versioned `Rule` rows and category flags are exercised in [`test_rule_resolution.py`](backend/tests/unit/test_rule_resolution.py). | Verified by tests |
+| 3 | Compliance results are frozen facts | **Verified closed** — persisted `ComplianceCheck` records and report evidence are covered by [`test_report_evidence.py`](backend/tests/integration/test_report_evidence.py). | Verified by tests |
+| 4 | Scans are append-only | **Verified closed** — each rescan creates a distinct row and leaves the original pending/result state untouched in [`test_scan_append_only.py`](backend/tests/integration/test_scan_append_only.py). | Verified by test |
+| 5 | Reports are immutable | **Verified closed** — regeneration creates a new report and links the prior report through `superseded_by_report_id` in [`test_report_immutability.py`](backend/tests/integration/test_report_immutability.py). | Verified by test |
+| 6 | RBAC enforced server-side, everywhere | **Verified closed** — authentication, role restrictions, scoped scans, status, report, admin-user, and review routes are covered by [`test_rbac.py`](backend/tests/integration/test_rbac.py). | Verified by tests |
+| 7 | Never fabricate certainty | **Verified closed** — no hardcoded confidence; absent localization/calibration or unparsable standard size yields `ManualReviewRequired`; evidence rendering skips unknown boxes. Covered by [`test_rule_resolution.py`](backend/tests/unit/test_rule_resolution.py), [`test_report_evidence.py`](backend/tests/integration/test_report_evidence.py), and [`test_infrastructure.py`](backend/tests/unit/test_infrastructure.py). | Verified by code audit and tests |
 
 Two out of seven non-negotiable principles already hold in the current code (append-only scans, report immutability) — these are real, verified strengths to build on. The other five are the actual remediation scope.
 
