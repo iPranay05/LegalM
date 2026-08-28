@@ -260,7 +260,7 @@ export default function ScanDetailPage() {
             </div>
           </div>
           <div className="flex flex-col items-start md:items-end gap-2">
-            <ComplianceBadge isCompliant={scan.is_compliant} showScore score={scan.compliance_score} />
+            <ComplianceBadge isCompliant={scan.is_compliant} headline={scan.compliance_summary?.headline} showScore score={scan.compliance_score} />
             <div className="w-48"><ScoreBar score={scan.compliance_score ?? 0} height="h-3" /></div>
             <p className="text-xs text-gray-400">Scanned {formatDate(scan.created_at)}</p>
           </div>

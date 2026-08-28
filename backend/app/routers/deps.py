@@ -35,3 +35,24 @@ def get_current_user_optional(
     if not payload:
         return None
     return db.query(User).filter(User.id == int(payload["sub"])).first()
+
+
+def require_role(*roles: str):
+    """
+    FastAPI dependency factory that checks if current_user.role is in the allowed roles.
+    Raises 403 if unauthorized, returns current_user otherwise.
+    """
+    def role_checker(current_user: User = Depends(get_current_user)) -> User:
+        user_role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+        allowed = {r.value if hasattr(r, "value") else str(r) for r in roles}
+        if user_role_val not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access forbidden: role '{user_role_val}' is not in allowed roles {list(allowed)}",
+            )
+        return current_user
+
+    return role_checker
+
+
+require_admin = require_role("Controller")

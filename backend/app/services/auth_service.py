@@ -43,3 +43,32 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
     if not user or not verify_password(password, user.hashed_password):
         return None
     return user
+
+
+def scope_scans_for_user(query, user: User, db: Session):
+    """
+    Scopes a Scan query to the user's role permissions:
+    - Inspector: sees only scans where inspector_id == user.id
+    - Controller / Analyst: sees all scans
+    - ManufacturerSelfCheck: sees only scans whose linked Product.manufacturer_id
+      matches the manufacturer linked to their account (Manufacturer.contact_email == user.email)
+    """
+    from app.models.scan import Scan
+    from app.models.product import Product
+    from app.models.manufacturer import Manufacturer
+    from app.models.user import UserRole
+
+    role_val = user.role.value if isinstance(user.role, UserRole) else str(user.role)
+
+    if role_val == UserRole.Inspector.value:
+        return query.filter(Scan.inspector_id == user.id)
+    elif role_val == UserRole.ManufacturerSelfCheck.value:
+        mfr = db.query(Manufacturer).filter(Manufacturer.contact_email == user.email).first()
+        if not mfr:
+            # No linked manufacturer -> empty query
+            return query.filter(Scan.id == -1)
+        return query.join(Product, Scan.product_id == Product.id).filter(Product.manufacturer_id == mfr.id)
+    elif role_val in (UserRole.Controller.value, UserRole.Analyst.value):
+        return query
+    # Fallback to own scans for safety
+    return query.filter(Scan.inspector_id == user.id)

@@ -145,7 +145,7 @@ export default function ResultScreen() {
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         {/* Status card */}
         <View style={[styles.statusCard, result.is_compliant ? styles.statusCardPass : styles.statusCardFail]}>
-          <ComplianceBadge isCompliant={result.is_compliant} score={result.compliance_score} size="lg" />
+          <ComplianceBadge isCompliant={result.is_compliant} headline={result.compliance_summary?.headline} score={result.compliance_score} size="lg" />
           <View style={styles.scoreBarWrap}>
             <View style={styles.scoreBarBg}>
               <View style={[

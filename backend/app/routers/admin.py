@@ -6,17 +6,13 @@ from typing import Optional, List
 from datetime import datetime
 from app.database import get_db
 from app.models.rules import Rule, RelaxationOrder
-from app.models.user import User
-from app.routers.deps import get_current_user
+from app.models.user import User, UserRole
+from app.routers.deps import get_current_user, require_admin
+from app.services.auth_service import hash_password, get_user_by_email
+from app.schemas import UserCreate
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
-
-
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role not in ("admin", "controller"):
-        raise HTTPException(status_code=403, detail="Controller/Admin access required")
-    return current_user
 
 
 # ── Rule schemas ──────────────────────────────────────────────────────────────
@@ -97,7 +93,7 @@ class UserAdminOut(BaseModel):
 
 
 class UserRoleUpdate(BaseModel):
-    role: str
+    role: UserRole
     is_active: bool
 
 
@@ -248,6 +244,30 @@ def deactivate_relaxation(
 
 # ── User management endpoints ──────────────────────────────────────────────────
 
+@router.post("/users", response_model=UserAdminOut, status_code=201)
+def create_user(
+    payload: UserCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Create a new user account across all 4 roles (Controller only)."""
+    if get_user_by_email(db, payload.email):
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    user = User(
+        name=payload.name,
+        email=payload.email,
+        hashed_password=hash_password(payload.password),
+        role=payload.role,
+        district=payload.district,
+        state=payload.state,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
 @router.get("/users", response_model=List[UserAdminOut])
 def list_users(
     role: Optional[str] = Query(None),
@@ -275,9 +295,6 @@ def update_user_role(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    valid_roles = ("inspector", "admin", "controller", "supervisor", "manufacturer")
-    if payload.role not in valid_roles:
-        raise HTTPException(status_code=400, detail=f"Invalid role. Valid: {valid_roles}")
     user.role = payload.role
     user.is_active = payload.is_active
     db.commit()

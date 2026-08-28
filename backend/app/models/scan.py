@@ -84,6 +84,13 @@ class Scan(Base):
     inspector = relationship("User", back_populates="scans", foreign_keys=[inspector_id])
     manual_findings = relationship("ManualFinding", back_populates="scan")
     reviewed_by = relationship("User", foreign_keys=[reviewed_by_id])
+    compliance_checks = relationship("ComplianceCheck", back_populates="scan")
+
+    @property
+    def compliance_summary(self) -> dict:
+        from app.services.compliance_engine import summarize_checks
+
+        return summarize_checks(self.compliance_checks or [])
 
 
 class ManualFinding(Base):

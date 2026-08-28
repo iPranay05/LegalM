@@ -87,19 +87,12 @@ def run_symbol_stage(image_bytes: bytes, ocr_text: str, category: str = "general
     return symbols
 
 
-def run_classifier_stage(ocr_text: str, category: str, symbols: dict) -> dict:
-    """Run compliance classifier with confidence scoring."""
-    from app.services.compliance_engine import check_compliance
-    result = check_compliance(ocr_text, category=category)
+def run_classifier_stage(scan_context: dict) -> dict:
+    """Run the confidence-gated declaration evaluator."""
+    from app.services.compliance_engine import evaluate_declarations, _legacy_summary_from_checks
 
-    # Inject symbol-derived fields into field_results
-    if symbols.get("veg_dot") or symbols.get("non_veg_dot"):
-        # Food type marking present
-        result["field_results"]["food_type_marking"] = True
-    if symbols.get("gm_mark"):
-        result["field_results"]["gm_declaration"] = True
-
-    return result
+    checks = evaluate_declarations(scan_context)
+    return _legacy_summary_from_checks(checks)
 
 
 def run_pipeline_sync(image_bytes: bytes,
@@ -140,34 +133,45 @@ def run_pipeline_sync(image_bytes: bytes,
     )
     symbols = run_symbol_stage(image_bytes, raw_text, category)
 
-    # ── Stage 4: Classifier ───────────────────────────────────────────────────
-    compliance = run_classifier_stage(raw_text, category, symbols)
-
-    # ── Stage 5: Groq LLM structured extraction ───────────────────────────────
+    # ── Stage 4: Groq LLM structured extraction ───────────────────────────────
     # If Groq vision already ran during OCR stage, reuse those fields directly.
     # Otherwise send the Tesseract text to the Groq text model.
     from app.services.groq_service import extract_structured
+    field_confidences = dict(ocr.get("field_confidences") or {})
     if groq_vision_fields:
         groq_fields = groq_vision_fields
         logger.info("Using Groq vision fields — skipping text extraction pass.")
     else:
-        groq_fields = extract_structured(raw_text)
+        structured = extract_structured(raw_text)
+        if structured.get("fields") is not None:
+            groq_fields = structured.get("fields") or {}
+            field_confidences.update(structured.get("field_confidences") or {})
+        else:
+            groq_fields = structured
     groq_used = bool(groq_fields)
 
-    if groq_used:
-        merged = {**compliance["extracted_fields"], **groq_fields}
-        compliance["extracted_fields"] = merged
-        for key in compliance["field_results"]:
-            if groq_fields.get(key):
-                compliance["field_results"][key] = True
-        compliance["missing_fields"] = [
-            k for k, v in compliance["field_results"].items() if not v
+    extracted_fields = dict(groq_fields)
+    manufacturer_parts = [
+        extracted_fields.get("manufacturer_name"),
+        extracted_fields.get("manufacturer_address"),
+    ]
+    manufacturer_info = ", ".join(part for part in manufacturer_parts if part)
+    if manufacturer_info and not extracted_fields.get("manufacturer_info"):
+        extracted_fields["manufacturer_info"] = manufacturer_info
+        part_confidences = [
+            field_confidences.get("manufacturer_name"),
+            field_confidences.get("manufacturer_address"),
         ]
+        usable_confidences = [float(c) for c in part_confidences if isinstance(c, (int, float))]
+        if usable_confidences:
+            field_confidences["manufacturer_info"] = sum(usable_confidences) / len(usable_confidences)
+
+    if groq_used:
+        logger.info("Using structured extraction fields: %s", list(extracted_fields.keys()))
 
     # ── Barcode info as highest-priority fallback for key fields ──────────────
     # Open Food Facts data is authoritative — overwrite only if present
     if barcode_product:
-        ef = compliance["extracted_fields"]
         for src_key, dst_key in [
             ("product_name",      "product_name"),
             ("brand_name",        "brand_name"),
@@ -177,22 +181,27 @@ def run_pipeline_sync(image_bytes: bytes,
             ("country_of_origin", "country_of_origin"),
         ]:
             val = barcode_product.get(src_key)
-            if val and not ef.get(dst_key):
-                ef[dst_key] = val
-                compliance["field_results"][dst_key] = True
-        compliance["extracted_fields"] = ef
-        compliance["missing_fields"] = [
-            k for k, v in compliance["field_results"].items() if not v
-        ]
+            if val and not extracted_fields.get(dst_key):
+                extracted_fields[dst_key] = val
+                field_confidences[dst_key] = 1.0
+
+    # ── Stage 5: Confidence-gated classifier ─────────────────────────────────
+    compliance = run_classifier_stage({
+        "ocr_text": raw_text,
+        "category": category,
+        "symbols": symbols,
+        "calibration": calibration,
+        "extracted_fields": extracted_fields,
+        "field_confidences": field_confidences,
+        "overall_confidence": ocr_confidence,
+        "low_confidence": ocr_low,
+    })
 
     # ── Bounding boxes ────────────────────────────────────────────────────────
     bounding_boxes = _build_bounding_boxes(compliance["extracted_fields"], ocr_confidence)
 
     # ── Pipeline status ───────────────────────────────────────────────────────
-    needs_review = ocr_low or any(
-        not v for k, v in compliance["field_results"].items()
-        if k in ("manufacturer_info", "net_quantity", "mrp")
-    )
+    needs_review = compliance["compliance_summary"]["headline"] == "NeedsManualReview"
     pipeline_status = "review_needed" if needs_review else "complete"
 
     return {
@@ -210,6 +219,8 @@ def run_pipeline_sync(image_bytes: bytes,
         "field_results": compliance["field_results"],
         "missing_fields": compliance["missing_fields"],
         "extracted_fields": compliance["extracted_fields"],
+        "compliance_checks": compliance["compliance_checks"],
+        "compliance_summary": compliance["compliance_summary"],
         "remarks": compliance["remarks"],
         "total_fields_checked": compliance["total_fields_checked"],
         "mandatory_fields_present": compliance["mandatory_fields_present"],

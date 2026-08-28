@@ -167,7 +167,7 @@ export default function ProductDetailPage() {
                     <ScoreBar score={s.compliance_score ?? 0} />
                   </td>
                   <td className="table-td">
-                    <ComplianceBadge isCompliant={s.is_compliant} />
+                    <ComplianceBadge isCompliant={s.is_compliant} headline={s.compliance_summary?.headline} />
                   </td>
                   <td className="table-td">
                     {s.pipeline_status === "review_needed"

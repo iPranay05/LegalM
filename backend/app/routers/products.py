@@ -4,8 +4,8 @@ from typing import Optional, List
 from app.database import get_db
 from app.models.product import Product
 from app.models.manufacturer import Manufacturer
-from app.models.user import User
-from app.routers.deps import get_current_user
+from app.models.user import User, UserRole
+from app.routers.deps import get_current_user, require_role
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -99,10 +99,8 @@ def list_manufacturers(
 def create_manufacturer(
     payload: ManufacturerCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("Controller")),
 ):
-    if current_user.role not in ("admin", "controller"):
-        raise HTTPException(status_code=403, detail="Only admins can register manufacturers")
     mfr = Manufacturer(**payload.model_dump())
     db.add(mfr)
     db.commit()
@@ -127,10 +125,8 @@ def update_manufacturer(
     mfr_id: int,
     payload: ManufacturerCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("Controller")),
 ):
-    if current_user.role not in ("admin", "controller"):
-        raise HTTPException(status_code=403, detail="Not authorised")
     mfr = db.query(Manufacturer).filter(Manufacturer.id == mfr_id).first()
     if not mfr:
         raise HTTPException(status_code=404, detail="Manufacturer not found")
@@ -156,8 +152,10 @@ def list_products(
 ):
     q = db.query(Product).filter(Product.is_active == True)
 
+    user_role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+
     # Self-check: manufacturers can only see their own products
-    if current_user.role == "manufacturer":
+    if user_role_val == UserRole.ManufacturerSelfCheck.value:
         # Find the manufacturer record linked to this user email
         mfr = db.query(Manufacturer).filter(
             Manufacturer.contact_email == current_user.email
@@ -183,7 +181,7 @@ def list_products(
 def create_product(
     payload: ProductCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("Inspector", "Controller", "ManufacturerSelfCheck")),
 ):
     if payload.sku:
         existing = db.query(Product).filter(Product.sku == payload.sku).first()
@@ -206,8 +204,10 @@ def get_product(
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    user_role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+
     # Self-check enforcement
-    if current_user.role == "manufacturer":
+    if user_role_val == UserRole.ManufacturerSelfCheck.value:
         mfr = db.query(Manufacturer).filter(
             Manufacturer.contact_email == current_user.email
         ).first()
@@ -222,7 +222,7 @@ def update_product(
     product_id: int,
     payload: ProductCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("Inspector", "Controller")),
 ):
     product = db.query(Product).filter(Product.id == product_id).first()
     if not product:

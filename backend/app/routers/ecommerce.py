@@ -120,7 +120,8 @@ def update_check(
     check = db.query(EcommerceCheck).filter(EcommerceCheck.check_id == check_id).first()
     if not check:
         raise HTTPException(status_code=404, detail="Check not found")
-    if check.checked_by_id != current_user.id and current_user.role not in ("admin", "controller"):
+    user_role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    if check.checked_by_id != current_user.id and user_role_val != "Controller":
         raise HTTPException(status_code=403, detail="Not authorised")
     if has_filter is not None:
         check.has_country_of_origin_filter = has_filter

@@ -52,6 +52,8 @@ export interface Scan {
   field_results?: Record<string, boolean>;
   missing_fields?: string[];
   extracted_fields?: Record<string, string>;
+  compliance_checks?: ComplianceCheck[];
+  compliance_summary?: ComplianceSummary;
   remarks?: string;
   review_status?: string;
   created_at: string;
@@ -64,6 +66,37 @@ export interface Scan {
     decoded: boolean;
   };
   groq_used?: boolean;
+}
+
+export type ComplianceCheckResult =
+  | "Pass"
+  | "Fail"
+  | "NotApplicable"
+  | "Relaxed"
+  | "ManualReviewRequired";
+
+export type ComplianceHeadline =
+  | "AllPass"
+  | "HasFailures"
+  | "NeedsManualReview";
+
+export interface ComplianceCheck {
+  id?: number;
+  scan_id?: string;
+  rule_id?: number;
+  field_key: string;
+  result: ComplianceCheckResult;
+  confidence?: number;
+  extracted_value?: string;
+  relaxation_order_id?: number;
+  notes?: string;
+  evaluated_at?: string;
+}
+
+export interface ComplianceSummary {
+  headline: ComplianceHeadline;
+  counts: Record<ComplianceCheckResult, number>;
+  total: number;
 }
 
 export interface BoundingBox {

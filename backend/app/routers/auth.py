@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas import UserCreate, UserOut, LoginRequest, TokenResponse
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services.auth_service import (
     hash_password,
     authenticate_user,
@@ -22,7 +22,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
         name=payload.name,
         email=payload.email,
         hashed_password=hash_password(payload.password),
-        role=payload.role,
+        role=UserRole.Inspector,  # Server-enforced default for public self-registration (Option B per §4.2)
         district=payload.district,
         state=payload.state,
     )
@@ -40,5 +40,6 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
-    token = create_access_token({"sub": str(user.id), "role": user.role})
+    role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
+    token = create_access_token({"sub": str(user.id), "role": role_val})
     return {"access_token": token, "token_type": "bearer", "user": user}

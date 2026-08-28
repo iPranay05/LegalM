@@ -1,7 +1,15 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+import enum
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
+
+
+class UserRole(str, enum.Enum):
+    Inspector = "Inspector"
+    Controller = "Controller"
+    Analyst = "Analyst"
+    ManufacturerSelfCheck = "ManufacturerSelfCheck"
 
 
 class User(Base):
@@ -11,7 +19,15 @@ class User(Base):
     name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
-    role = Column(String, default="inspector")  # inspector | admin
+    role = Column(
+        Enum(
+            UserRole,
+            name="user_role_enum",
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
+        default=UserRole.Inspector,
+        nullable=False,
+    )
     district = Column(String, nullable=True)
     state = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)

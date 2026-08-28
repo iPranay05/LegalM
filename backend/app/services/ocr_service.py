@@ -35,6 +35,57 @@ def preprocess_image(image: Image.Image) -> Image.Image:
     return image
 
 
+def _average(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _derive_field_confidences(raw_text: str, word_data: dict, avg_confidence: float) -> dict:
+    from app.services.compliance_engine import COMPLIANCE_FIELDS, _check_field, _normalize
+
+    normalized_text = _normalize(raw_text)
+    words = []
+    for text, conf in zip(word_data.get("text", []), word_data.get("conf", [])):
+        token = str(text).strip().lower()
+        try:
+            score = float(conf)
+        except (TypeError, ValueError):
+            continue
+        if token and score > 0:
+            words.append((token, score / 100))
+
+    confidences = {}
+    default_confidence = round(avg_confidence / 100, 2)
+    for field in COMPLIANCE_FIELDS:
+        key = field["key"]
+        if not _check_field(field, normalized_text):
+            confidences[key] = default_confidence
+            continue
+
+        markers = [key.replace("_", " ")]
+        if key == "manufacturer_info":
+            markers.extend(["manufactured", "packed", "imported", "marketed"])
+        elif key == "net_quantity":
+            markers.extend(["net", "quantity", "weight", "qty"])
+        elif key == "mrp":
+            markers.extend(["mrp", "rs", "inr", "price"])
+        elif key == "mfg_date":
+            markers.extend(["mfg", "manufactured", "packed"])
+        elif key == "expiry_date":
+            markers.extend(["expiry", "exp", "before"])
+        elif key == "consumer_care":
+            markers.extend(["consumer", "care", "helpline", "contact"])
+        elif key == "country_of_origin":
+            markers.extend(["origin", "made"])
+        elif key == "fssai_number":
+            markers.extend(["fssai", "licence", "license"])
+
+        marker_tokens = {token for marker in markers for token in marker.split()}
+        matched_scores = [score for token, score in words if token.strip(".:") in marker_tokens]
+        confidences[key] = round(_average(matched_scores) if matched_scores else default_confidence, 2)
+
+    return confidences
+
+
 def _tesseract_extract(image_bytes: bytes) -> dict:
     """Run Tesseract OCR and return text + confidence."""
     if not TESSERACT_AVAILABLE:
@@ -49,6 +100,7 @@ def _tesseract_extract(image_bytes: bytes) -> dict:
         except Exception:
             raw_text = pytesseract.image_to_string(processed, lang="eng")
 
+        data = {}
         try:
             data = pytesseract.image_to_data(
                 processed, lang="eng", output_type=pytesseract.Output.DICT
@@ -61,6 +113,7 @@ def _tesseract_extract(image_bytes: bytes) -> dict:
         return {
             "text": raw_text.strip(),
             "confidence": round(avg_confidence, 2),
+            "field_confidences": _derive_field_confidences(raw_text, data, avg_confidence),
             "success": True,
             "error": None,
             "source": "tesseract",
@@ -85,7 +138,9 @@ def extract_text_from_bytes(image_bytes: bytes) -> dict:
     from app.services.groq_service import extract_from_image, _get_api_key
 
     if _get_api_key():
-        groq_fields = extract_from_image(image_bytes)
+        groq_result = extract_from_image(image_bytes)
+        groq_fields = groq_result.get("fields", {}) if isinstance(groq_result, dict) else {}
+        field_confidences = groq_result.get("field_confidences", {}) if isinstance(groq_result, dict) else {}
         if groq_fields:
             # Convert structured fields back to readable text for downstream
             # compliance engine (which expects raw text to keyword-match against)
@@ -94,10 +149,16 @@ def extract_text_from_bytes(image_bytes: bytes) -> dict:
                 if val:
                     text_lines.append(f"{key.replace('_', ' ').title()}: {val}")
             synthesized_text = "\n".join(text_lines)
+            confidence_values = [
+                float(conf) for conf in field_confidences.values()
+                if isinstance(conf, (int, float)) and conf > 0
+            ]
+            overall_confidence = round(_average(confidence_values) * 100, 2)
 
             return {
                 "text": synthesized_text,
-                "confidence": 95.0,        # Groq vision is highly reliable
+                "confidence": overall_confidence,
+                "field_confidences": field_confidences,
                 "success": True,
                 "error": None,
                 "source": "groq_vision",

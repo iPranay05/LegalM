@@ -147,7 +147,7 @@ export default function ScansPage() {
                       <ScoreBar score={scan.compliance_score ?? 0} />
                     </td>
                     <td className="table-td">
-                      <ComplianceBadge isCompliant={scan.is_compliant} />
+                      <ComplianceBadge isCompliant={scan.is_compliant} headline={scan.compliance_summary?.headline} />
                     </td>
                     <td className="table-td">
                       {scan.missing_fields && scan.missing_fields.length > 0 ? (

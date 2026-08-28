@@ -8,6 +8,7 @@ from app.database import get_db
 from app.models.scan import Scan, ManualFinding
 from app.models.user import User
 from app.routers.deps import get_current_user
+from app.services.auth_service import scope_scans_for_user
 from app.services.compliance_engine import get_field_definitions
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
@@ -15,11 +16,7 @@ router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
 def _base_scan_query(db: Session, current_user: User):
     """Returns a query scoped to the user's role."""
-    q = db.query(Scan)
-    # Inspectors see only their own scans; supervisors/admins see all
-    if current_user.role == "inspector":
-        q = q.filter(Scan.inspector_id == current_user.id)
-    return q
+    return scope_scans_for_user(db.query(Scan), current_user, db)
 
 
 @router.get("/stats")

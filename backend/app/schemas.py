@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from app.models.user import UserRole
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -9,7 +10,7 @@ class UserCreate(BaseModel):
     name: str
     email: EmailStr
     password: str
-    role: str = "inspector"
+    role: UserRole = UserRole.Inspector
     district: Optional[str] = None
     state: Optional[str] = None
 
@@ -49,6 +50,28 @@ class ScanCreate(BaseModel):
     district: Optional[str] = None
 
 
+class ComplianceCheckOut(BaseModel):
+    id: Optional[int] = None
+    scan_id: Optional[str] = None
+    rule_id: Optional[int] = None
+    field_key: str
+    result: str
+    confidence: Optional[float] = None
+    extracted_value: Optional[str] = None
+    relaxation_order_id: Optional[int] = None
+    notes: Optional[str] = None
+    evaluated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ComplianceSummaryOut(BaseModel):
+    headline: str
+    counts: Dict[str, int]
+    total: int
+
+
 class ScanOut(BaseModel):
     id: int
     scan_id: str
@@ -66,6 +89,8 @@ class ScanOut(BaseModel):
     field_results: Optional[Dict[str, bool]]
     missing_fields: Optional[List[str]]
     extracted_fields: Optional[Dict[str, Any]]
+    compliance_checks: Optional[List[ComplianceCheckOut]] = None
+    compliance_summary: Optional[ComplianceSummaryOut] = None
     remarks: Optional[str]
     created_at: datetime
     inspector_id: Optional[int]
@@ -87,6 +112,8 @@ class ComplianceResult(BaseModel):
     total_mandatory_fields: int
     ocr_confidence: float
     raw_ocr_text: str
+    compliance_checks: List[ComplianceCheckOut] = []
+    compliance_summary: ComplianceSummaryOut
 
 
 # ── Dashboard stats ───────────────────────────────────────────────────────────

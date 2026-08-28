@@ -3,7 +3,7 @@ Run once to create the default admin user.
 Usage: python seed.py
 """
 from app.database import SessionLocal, engine, Base
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.scan import Scan  # must be imported so SQLAlchemy can resolve the relationship
 from app.services.auth_service import hash_password
 
@@ -21,7 +21,7 @@ else:
         name="Admin",
         email="admin@lm.gov.in",
         hashed_password=hash_password("admin1234"),
-        role="admin",
+        role=UserRole.Controller,
         district="Central",
         state="Delhi",
         is_active=True,

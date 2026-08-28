@@ -23,24 +23,27 @@ GROQ_MODEL_VISION = "qwen/qwen3.6-27b"   # vision model (image + text)
 GROQ_MODEL_TEXT   = "openai/gpt-oss-20b" # text-only model (fast, available on free plan)
 
 _FIELDS_SCHEMA = """{
-  "product_name": "Common/generic name of the commodity (e.g. 'Iodised Salt', 'ORS')",
-  "brand_name": "Brand or trade name (e.g. 'Tata', 'Orsl', 'Dettol')",
-  "manufacturer_name": "Name of manufacturer, packer or importer",
-  "manufacturer_address": "Full address of manufacturer or packer",
-  "net_quantity": "Net quantity with unit (e.g. '500g', '1L', '200ml')",
-  "mrp": "Maximum Retail Price incl. taxes (digits only or with Rs., e.g. '45')",
-  "mfg_date": "Manufacturing or packing date (e.g. 'Jan 2024', '01/2024')",
-  "expiry_date": "Best before or expiry date",
-  "batch_number": "Batch or lot number",
-  "fssai_number": "FSSAI licence number — exactly 14 digits",
-  "consumer_care": "Consumer care phone number or email",
-  "country_of_origin": "Country of origin (for imported products only)"
+  "product_name": {"value": "Common/generic name of the commodity (e.g. 'Iodised Salt', 'ORS')", "confidence": 0.0},
+  "brand_name": {"value": "Brand or trade name (e.g. 'Tata', 'Orsl', 'Dettol')", "confidence": 0.0},
+  "manufacturer_name": {"value": "Name of manufacturer, packer or importer", "confidence": 0.0},
+  "manufacturer_address": {"value": "Full address of manufacturer or packer", "confidence": 0.0},
+  "net_quantity": {"value": "Net quantity with unit (e.g. '500g', '1L', '200ml')", "confidence": 0.0},
+  "mrp": {"value": "Maximum Retail Price incl. taxes (digits only or with Rs., e.g. '45')", "confidence": 0.0},
+  "mfg_date": {"value": "Manufacturing or packing date (e.g. 'Jan 2024', '01/2024')", "confidence": 0.0},
+  "expiry_date": {"value": "Best before or expiry date", "confidence": 0.0},
+  "batch_number": {"value": "Batch or lot number", "confidence": 0.0},
+  "fssai_number": {"value": "FSSAI licence number, exactly 14 digits", "confidence": 0.0},
+  "consumer_care": {"value": "Consumer care phone number or email", "confidence": 0.0},
+  "country_of_origin": {"value": "Country of origin (for imported products only)", "confidence": 0.0}
 }"""
 
 _RULES = """Rules:
 - product_name = generic/common name, NOT the brand name
 - brand_name = trade/brand name printed large on the label
 - Extract ONLY what is clearly visible — never invent values
+- Each field must be an object with value and confidence
+- confidence must be a number from 0.0 to 1.0 based only on visual certainty
+- If a field is unclear, partially obscured, or guessed, set value to null or confidence below 0.6
 - For Hindi/Devanagari text, transliterate to English
 - Output raw JSON only — no markdown fences, no code blocks, no explanation text"""
 
@@ -77,13 +80,35 @@ def _get_api_key() -> str:
     return key
 
 
+def _is_real_value(value) -> bool:
+    return value is not None and str(value).strip() not in ("", "null", "None", "N/A", "n/a")
+
+
+def _normalize_confidence(value) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if confidence > 1:
+        confidence = confidence / 100
+    return max(0.0, min(confidence, 1.0))
+
+
 def _sanitize(parsed: dict) -> dict:
-    """Remove null/empty/placeholder values and strip whitespace."""
-    return {
-        k: v.strip() if isinstance(v, str) else v
-        for k, v in parsed.items()
-        if v is not None and str(v).strip() not in ("", "null", "None", "N/A", "n/a")
-    }
+    """Normalize model JSON into field values plus per-field confidences."""
+    fields = {}
+    confidences = {}
+    for key, raw in parsed.items():
+        if isinstance(raw, dict):
+            value = raw.get("value")
+            confidence = _normalize_confidence(raw.get("confidence"))
+        else:
+            value = raw
+            confidence = 0.0
+        confidences[key] = confidence
+        if _is_real_value(value):
+            fields[key] = value.strip() if isinstance(value, str) else value
+    return {"fields": fields, "field_confidences": confidences}
 
 
 def _parse_json(text: str) -> dict:
@@ -158,7 +183,7 @@ def extract_from_image(image_bytes: bytes) -> dict:
             return {}
 
         result = _sanitize(parsed)
-        logger.info("Groq vision OCR succeeded: %s", list(result.keys()))
+        logger.info("Groq vision OCR succeeded: %s", list(result["fields"].keys()))
         return result
 
     except ImportError:

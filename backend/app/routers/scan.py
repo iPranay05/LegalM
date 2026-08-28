@@ -7,9 +7,11 @@ from typing import Optional, List
 from datetime import datetime
 from app.database import get_db
 from app.models.scan import Scan, ManualFinding
+from app.models.rules import ComplianceCheck, ComplianceCheckResult as ComplianceCheckResultEnum
 from app.models.product import Product
-from app.models.user import User
-from app.routers.deps import get_current_user, get_current_user_optional
+from app.models.user import User, UserRole
+from app.routers.deps import get_current_user, require_role
+from app.services.auth_service import scope_scans_for_user
 from app.config import settings
 from pydantic import BaseModel
 
@@ -56,6 +58,21 @@ def _upsert_product(db: Session, product_name: str, category: str, scan: Scan) -
     return product
 
 
+def _persist_compliance_checks(db: Session, scan_id: str, checks: list[dict]) -> None:
+    for check in checks or []:
+        result = check.get("result")
+        db.add(ComplianceCheck(
+            scan_id=scan_id,
+            rule_id=check.get("rule_id"),
+            field_key=check["field_key"],
+            result=ComplianceCheckResultEnum(result),
+            confidence=check.get("confidence"),
+            extracted_value=check.get("extracted_value"),
+            relaxation_order_id=check.get("relaxation_order_id"),
+            notes=check.get("notes"),
+        ))
+
+
 # ── Response schemas ───────────────────────────────────────────────────────────
 
 class BoundingBox(BaseModel):
@@ -89,6 +106,28 @@ class ManualFindingOut(BaseModel):
         from_attributes = True
 
 
+class ComplianceCheckOut(BaseModel):
+    id: Optional[int] = None
+    scan_id: Optional[str] = None
+    rule_id: Optional[int] = None
+    field_key: str
+    result: str
+    confidence: Optional[float] = None
+    extracted_value: Optional[str] = None
+    relaxation_order_id: Optional[int] = None
+    notes: Optional[str] = None
+    evaluated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ComplianceSummaryOut(BaseModel):
+    headline: str
+    counts: dict
+    total: int
+
+
 class ScanOut(BaseModel):
     id: int
     scan_id: str
@@ -112,6 +151,8 @@ class ScanOut(BaseModel):
     field_results: Optional[dict]
     missing_fields: Optional[List[str]]
     extracted_fields: Optional[dict]
+    compliance_checks: Optional[List[ComplianceCheckOut]] = None
+    compliance_summary: Optional[ComplianceSummaryOut] = None
     remarks: Optional[str]
     review_status: Optional[str]
     created_at: datetime
@@ -142,7 +183,7 @@ async def upload_and_scan(
     label_width_mm: Optional[float] = Form(None),
     label_height_mm: Optional[float] = Form(None),
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user_optional),
+    current_user: User = Depends(require_role("Inspector", "ManufacturerSelfCheck")),
 ):
     if file.content_type not in ALLOWED_TYPES:
         raise HTTPException(status_code=400,
@@ -228,6 +269,7 @@ async def upload_and_scan(
     )
     db.add(scan)
     db.flush()
+    _persist_compliance_checks(db, scan.scan_id, pipeline_result.get("compliance_checks", []))
     _upsert_product(db, product_name, category or "general", scan)
     db.commit()
     db.refresh(scan)
@@ -243,7 +285,7 @@ async def upload_multi_and_scan(
     state: Optional[str] = Form(None),
     district: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user_optional),
+    current_user: User = Depends(require_role("Inspector", "ManufacturerSelfCheck")),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -274,11 +316,22 @@ async def upload_multi_and_scan(
     if len(all_bytes) > 1:
         from app.services.ocr_service import extract_text_from_bytes
         combined_text = pipeline_result.get("raw_ocr_text", "")
+        combined_confidences = {}
         for extra_bytes in all_bytes[1:]:
             extra_ocr = extract_text_from_bytes(extra_bytes)
             combined_text += "\n" + extra_ocr.get("text", "")
-        from app.services.compliance_engine import check_compliance
-        re_compliance = check_compliance(combined_text, category=category or "general")
+            combined_confidences.update(extra_ocr.get("field_confidences") or {})
+        from app.services.pipeline_service import run_classifier_stage
+        re_compliance = run_classifier_stage({
+            "ocr_text": combined_text,
+            "category": category or "general",
+            "symbols": pipeline_result.get("symbols_detected") or {},
+            "calibration": {},
+            "extracted_fields": pipeline_result.get("extracted_fields") or {},
+            "field_confidences": combined_confidences,
+            "overall_confidence": pipeline_result.get("ocr_confidence"),
+            "low_confidence": pipeline_result.get("low_confidence_ocr"),
+        })
         pipeline_result.update({
             "raw_ocr_text": combined_text,
             "is_compliant": re_compliance["is_compliant"],
@@ -286,6 +339,8 @@ async def upload_multi_and_scan(
             "field_results": re_compliance["field_results"],
             "missing_fields": re_compliance["missing_fields"],
             "extracted_fields": re_compliance["extracted_fields"],
+            "compliance_checks": re_compliance["compliance_checks"],
+            "compliance_summary": re_compliance["compliance_summary"],
             "remarks": re_compliance["remarks"],
         })
 
@@ -329,6 +384,7 @@ async def upload_multi_and_scan(
     )
     db.add(scan)
     db.flush()
+    _persist_compliance_checks(db, scan.scan_id, pipeline_result.get("compliance_checks", []))
     _upsert_product(db, product_name, category or "general", scan)
     db.commit()
     db.refresh(scan)
@@ -349,8 +405,9 @@ def list_scans(
     review_status: Optional[str] = None,
     product_id: Optional[int] = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    query = db.query(Scan)
+    query = scope_scans_for_user(db.query(Scan), current_user, db)
     if state:
         query = query.filter(Scan.state == state)
     if district:
@@ -369,9 +426,17 @@ def list_scans(
 
 
 @router.get("/{scan_id}", response_model=ScanOut)
-def get_scan(scan_id: str, db: Session = Depends(get_db)):
-    scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+def get_scan(
+    scan_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = scope_scans_for_user(db.query(Scan), current_user, db)
+    scan = query.filter(Scan.scan_id == scan_id).first()
     if not scan:
+        existing = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if existing:
+            raise HTTPException(status_code=403, detail="Not authorised to view this scan")
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
 
@@ -384,8 +449,12 @@ def get_scan_result_tabs(
 ):
     from app.services.compliance_engine import COMPLIANCE_FIELDS
 
-    scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+    query = scope_scans_for_user(db.query(Scan), current_user, db)
+    scan = query.filter(Scan.scan_id == scan_id).first()
     if not scan:
+        existing = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if existing:
+            raise HTTPException(status_code=403, detail="Not authorised to view this scan")
         raise HTTPException(status_code=404, detail="Scan not found")
 
     field_results = scan.field_results or {}
@@ -435,8 +504,12 @@ def confirm_bounding_box(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+    query = scope_scans_for_user(db.query(Scan), current_user, db)
+    scan = query.filter(Scan.scan_id == scan_id).first()
     if not scan:
+        existing = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if existing:
+            raise HTTPException(status_code=403, detail="Not authorised to view this scan")
         raise HTTPException(status_code=404, detail="Scan not found")
 
     boxes = scan.bounding_boxes or []
@@ -466,8 +539,12 @@ def mark_review_complete(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+    query = scope_scans_for_user(db.query(Scan), current_user, db)
+    scan = query.filter(Scan.scan_id == scan_id).first()
     if not scan:
+        existing = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if existing:
+            raise HTTPException(status_code=403, detail="Not authorised to view this scan")
         raise HTTPException(status_code=404, detail="Scan not found")
 
     unconfirmed = [b for b in (scan.bounding_boxes or []) if not b.get("confirmed")]
@@ -484,7 +561,7 @@ def mark_review_complete(
     return {"detail": "Review complete", "scan_id": scan_id}
 
 
-# ── Manual findings ────────────────────────────────────────────────────────────
+# ── Manual findings ────────────────────────────────────────────────────
 
 @router.post("/{scan_id}/findings", response_model=ManualFindingOut, status_code=201)
 def add_manual_finding(
@@ -493,8 +570,12 @@ def add_manual_finding(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+    query = scope_scans_for_user(db.query(Scan), current_user, db)
+    scan = query.filter(Scan.scan_id == scan_id).first()
     if not scan:
+        existing = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if existing:
+            raise HTTPException(status_code=403, detail="Not authorised to view this scan")
         raise HTTPException(status_code=404, detail="Scan not found")
 
     finding = ManualFinding(
@@ -519,6 +600,14 @@ def list_findings(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    query = scope_scans_for_user(db.query(Scan), current_user, db)
+    scan = query.filter(Scan.scan_id == scan_id).first()
+    if not scan:
+        existing = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if existing:
+            raise HTTPException(status_code=403, detail="Not authorised to view this scan")
+        raise HTTPException(status_code=404, detail="Scan not found")
+
     return db.query(ManualFinding).filter(ManualFinding.scan_id == scan_id).all()
 
 
@@ -529,13 +618,22 @@ def delete_finding(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    query = scope_scans_for_user(db.query(Scan), current_user, db)
+    scan = query.filter(Scan.scan_id == scan_id).first()
+    if not scan:
+        existing = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if existing:
+            raise HTTPException(status_code=403, detail="Not authorised to view this scan")
+        raise HTTPException(status_code=404, detail="Scan not found")
+
     finding = db.query(ManualFinding).filter(
         ManualFinding.id == finding_id,
         ManualFinding.scan_id == scan_id,
     ).first()
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
-    if finding.recorded_by_id != current_user.id and current_user.role not in ("admin", "controller"):
+    user_role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    if finding.recorded_by_id != current_user.id and user_role_val != "Controller":
         raise HTTPException(status_code=403, detail="Not authorised")
     db.delete(finding)
     db.commit()

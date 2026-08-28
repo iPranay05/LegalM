@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, JSON
+import enum
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, JSON, Float, Enum
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
@@ -30,6 +31,7 @@ class Rule(Base):
     created_by = relationship("User", foreign_keys=[created_by_id])
     retired_by = relationship("User", foreign_keys=[retired_by_id])
     relaxations = relationship("RelaxationOrder", back_populates="rule")
+    compliance_checks = relationship("ComplianceCheck", back_populates="rule")
 
 
 class RelaxationOrder(Base):
@@ -54,3 +56,35 @@ class RelaxationOrder(Base):
 
     rule = relationship("Rule", back_populates="relaxations")
     created_by = relationship("User", foreign_keys=[created_by_id])
+    compliance_checks = relationship("ComplianceCheck", back_populates="relaxation_order")
+
+
+class ComplianceCheckResult(str, enum.Enum):
+    Pass = "Pass"
+    Fail = "Fail"
+    NotApplicable = "NotApplicable"
+    Relaxed = "Relaxed"
+    ManualReviewRequired = "ManualReviewRequired"
+
+
+class ComplianceCheck(Base):
+    """
+    Frozen per-declaration compliance result for a scan.
+    Re-evaluation inserts new rows rather than updating existing rows.
+    """
+    __tablename__ = "compliance_checks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    scan_id = Column(String, ForeignKey("scans.scan_id"), nullable=False, index=True)
+    rule_id = Column(Integer, ForeignKey("rules.id"), nullable=True)
+    field_key = Column(String, nullable=False, index=True)
+    result = Column(Enum(ComplianceCheckResult), nullable=False)
+    confidence = Column(Float, nullable=True)
+    extracted_value = Column(String, nullable=True)
+    relaxation_order_id = Column(Integer, ForeignKey("relaxation_orders.id"), nullable=True)
+    notes = Column(Text, nullable=True)
+    evaluated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    scan = relationship("Scan", back_populates="compliance_checks")
+    rule = relationship("Rule", back_populates="compliance_checks")
+    relaxation_order = relationship("RelaxationOrder", back_populates="compliance_checks")

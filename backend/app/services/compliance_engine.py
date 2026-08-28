@@ -16,7 +16,9 @@ Each field carries a weight. Score = sum of weights for present fields / total w
 """
 
 import re
-from typing import Optional
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from typing import Optional, Sequence
 
 # ---------------------------------------------------------------------------
 # Field definitions — name, weight, patterns, description
@@ -167,6 +169,32 @@ TOTAL_MANDATORY_WEIGHT = sum(
     f["weight"] for f in COMPLIANCE_FIELDS if f["required"]
 )
 
+FIELD_CONFIDENCE_THRESHOLD = 0.6
+CHECK_RESULTS = (
+    "Pass",
+    "Fail",
+    "NotApplicable",
+    "Relaxed",
+    "ManualReviewRequired",
+)
+
+
+@dataclass(frozen=True)
+class ComplianceCheckResult:
+    field_key: str
+    result: str
+    confidence: Optional[float] = None
+    extracted_value: Optional[str] = None
+    rule_id: Optional[int] = None
+    relaxation_order_id: Optional[int] = None
+    notes: Optional[str] = None
+    evaluated_at: datetime = field(default_factory=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["evaluated_at"] = self.evaluated_at.isoformat()
+        return data
+
 
 # ---------------------------------------------------------------------------
 # Helper utilities
@@ -209,6 +237,151 @@ def _extract_value(key: str, text: str) -> Optional[str]:
     return None
 
 
+def _normalize_confidence(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    if confidence > 1:
+        confidence = confidence / 100
+    return max(0.0, min(confidence, 1.0))
+
+
+def _field_confidence(field_key: str, field_confidences: dict, overall_confidence: Optional[float]) -> Optional[float]:
+    confidence = _normalize_confidence(field_confidences.get(field_key))
+    if confidence is not None:
+        return confidence
+    return _normalize_confidence(overall_confidence)
+
+
+def _has_extracted_value(value) -> bool:
+    return value is not None and str(value).strip() not in ("", "null", "None", "N/A", "n/a")
+
+
+def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
+    """
+    Evaluate declarations with five possible outcomes.
+
+    Phase 2 keeps COMPLIANCE_FIELDS as the detection catalog, but the outcome is
+    now confidence-gated: low confidence always becomes ManualReviewRequired,
+    never a guessed Pass or Fail.
+    """
+    ocr_text = scan_context.get("ocr_text") or scan_context.get("raw_ocr_text") or ""
+    normalized_text = _normalize(ocr_text)
+    extracted_fields = scan_context.get("extracted_fields") or {}
+    field_confidences = scan_context.get("field_confidences") or {}
+    overall_confidence = scan_context.get("overall_confidence", scan_context.get("ocr_confidence"))
+    low_confidence = bool(scan_context.get("low_confidence") or scan_context.get("low_confidence_ocr"))
+
+    checks: list[ComplianceCheckResult] = []
+    now = datetime.utcnow()
+    for field in COMPLIANCE_FIELDS:
+        key = field["key"]
+        confidence = _field_confidence(key, field_confidences, overall_confidence)
+        value = extracted_fields.get(key)
+        text_present = _check_field(field, normalized_text)
+        extracted_value = str(value).strip() if _has_extracted_value(value) else _extract_value(key, normalized_text)
+        present = _has_extracted_value(extracted_value) or text_present
+
+        if low_confidence or confidence is None or confidence < FIELD_CONFIDENCE_THRESHOLD:
+            result = "ManualReviewRequired"
+            notes = "Extraction confidence below threshold; officer review required."
+        elif present:
+            result = "Pass"
+            notes = None
+        else:
+            result = "Fail"
+            notes = None
+
+        checks.append(
+            ComplianceCheckResult(
+                field_key=key,
+                result=result,
+                confidence=confidence,
+                extracted_value=extracted_value,
+                notes=notes,
+                evaluated_at=now,
+            )
+        )
+
+    return checks
+
+
+def summarize_checks(checks: Sequence[ComplianceCheckResult | object | dict]) -> dict:
+    counts = {result: 0 for result in CHECK_RESULTS}
+
+    for check in checks:
+        if isinstance(check, dict):
+            result = check.get("result")
+        else:
+            result = getattr(check, "result", None)
+            if hasattr(result, "value"):
+                result = result.value
+        if result in counts:
+            counts[result] += 1
+
+    if counts["ManualReviewRequired"]:
+        headline = "NeedsManualReview"
+    elif counts["Fail"]:
+        headline = "HasFailures"
+    else:
+        headline = "AllPass"
+
+    return {
+        "headline": headline,
+        "counts": counts,
+        "total": sum(counts.values()),
+    }
+
+
+def _legacy_summary_from_checks(checks: Sequence[ComplianceCheckResult]) -> dict:
+    field_results = {
+        check.field_key: check.result in ("Pass", "Relaxed")
+        for check in checks
+    }
+    extracted_fields = {
+        check.field_key: check.extracted_value
+        for check in checks
+        if _has_extracted_value(check.extracted_value)
+    }
+    missing_fields = [
+        field["label"]
+        for field in COMPLIANCE_FIELDS
+        if field["required"] and not field_results.get(field["key"], False)
+    ]
+
+    mandatory_fields_present = sum(
+        1 for field in COMPLIANCE_FIELDS
+        if field["required"] and field_results.get(field["key"], False)
+    )
+    total_mandatory_fields = sum(1 for field in COMPLIANCE_FIELDS if field["required"])
+    compliance_score = round((mandatory_fields_present / total_mandatory_fields) * 100, 1)
+    summary = summarize_checks(checks)
+
+    if summary["headline"] == "NeedsManualReview":
+        remarks = "One or more declarations require manual review because extraction confidence is insufficient."
+    elif summary["headline"] == "HasFailures":
+        remarks = f"Missing mandatory declarations: {', '.join(missing_fields)}." if missing_fields else "One or more declaration checks failed."
+    else:
+        remarks = "All evaluated declarations passed."
+
+    return {
+        "is_compliant": summary["headline"] == "AllPass",
+        "compliance_score": compliance_score,
+        "field_results": field_results,
+        "missing_fields": missing_fields,
+        "extracted_fields": extracted_fields,
+        "remarks": remarks,
+        "total_fields_checked": len(checks),
+        "mandatory_fields_present": mandatory_fields_present,
+        "total_mandatory_fields": total_mandatory_fields,
+        "compliance_checks": [check.to_dict() for check in checks],
+        "compliance_summary": summary,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main compliance check function
 # ---------------------------------------------------------------------------
@@ -225,62 +398,13 @@ def check_compliance(ocr_text: str, category: str = "general") -> dict:
         A dict with compliance result, score, field results, missing fields,
         extracted values, and remarks.
     """
-    normalized_text = _normalize(ocr_text)
-
-    field_results = {}
-    extracted_fields = {}
-    missing_fields = []
-    present_mandatory_weight = 0
-
-    for field in COMPLIANCE_FIELDS:
-        key = field["key"]
-        is_present = _check_field(field, normalized_text)
-        field_results[key] = is_present
-
-        if is_present:
-            value = _extract_value(key, normalized_text)
-            if value:
-                extracted_fields[key] = value
-            if field["required"]:
-                present_mandatory_weight += field["weight"]
-        else:
-            if field["required"]:
-                missing_fields.append(field["label"])
-
-    # Score based on mandatory fields only
-    compliance_score = round((present_mandatory_weight / TOTAL_MANDATORY_WEIGHT) * 100, 1)
-    is_compliant = compliance_score >= 80.0  # >= 80% of mandatory fields present = PASS
-
-    # Build violation remarks
-    remarks_parts = []
-    if missing_fields:
-        remarks_parts.append(
-            f"Missing mandatory declarations: {', '.join(missing_fields)}."
-        )
-    if compliance_score >= 80:
-        remarks_parts.append("Product label is substantially compliant with LM(PC) Rules 2011.")
-    elif compliance_score >= 50:
-        remarks_parts.append(
-            "Partial compliance. Label requires correction before market sale."
-        )
-    else:
-        remarks_parts.append(
-            "Major non-compliance. Label fails to meet minimum LM(PC) Rules 2011 requirements."
-        )
-
-    return {
-        "is_compliant": is_compliant,
-        "compliance_score": compliance_score,
-        "field_results": field_results,
-        "missing_fields": missing_fields,
-        "extracted_fields": extracted_fields,
-        "remarks": " ".join(remarks_parts),
-        "total_fields_checked": len(COMPLIANCE_FIELDS),
-        "mandatory_fields_present": sum(
-            1 for f in COMPLIANCE_FIELDS if f["required"] and field_results.get(f["key"])
-        ),
-        "total_mandatory_fields": sum(1 for f in COMPLIANCE_FIELDS if f["required"]),
-    }
+    checks = evaluate_declarations({
+        "ocr_text": ocr_text,
+        "category": category,
+        "overall_confidence": 1.0,
+        "low_confidence": False,
+    })
+    return _legacy_summary_from_checks(checks)
 
 
 def get_field_definitions() -> list:

@@ -5,6 +5,8 @@ export interface ComplianceResult {
   field_results: Record<string, boolean>;
   missing_fields: string[];
   extracted_fields: Record<string, string>;
+  compliance_checks?: ComplianceCheck[];
+  compliance_summary?: ComplianceSummary;
   remarks: string;
   total_fields_checked: number;
   mandatory_fields_present: number;
@@ -87,10 +89,43 @@ export interface Scan {
   compliance_score?: number;
   missing_fields?: string[];
   extracted_fields?: Record<string, string>;
+  compliance_checks?: ComplianceCheck[];
+  compliance_summary?: ComplianceSummary;
   remarks?: string;
   pipeline_status?: string;
   review_status?: string;
   created_at: string;
+}
+
+export type ComplianceCheckResultValue =
+  | "Pass"
+  | "Fail"
+  | "NotApplicable"
+  | "Relaxed"
+  | "ManualReviewRequired";
+
+export type ComplianceHeadline =
+  | "AllPass"
+  | "HasFailures"
+  | "NeedsManualReview";
+
+export interface ComplianceCheck {
+  id?: number;
+  scan_id?: string;
+  rule_id?: number;
+  field_key: string;
+  result: ComplianceCheckResultValue;
+  confidence?: number;
+  extracted_value?: string;
+  relaxation_order_id?: number;
+  notes?: string;
+  evaluated_at?: string;
+}
+
+export interface ComplianceSummary {
+  headline: ComplianceHeadline;
+  counts: Record<ComplianceCheckResultValue, number>;
+  total: number;
 }
 
 export const PRODUCT_CATEGORIES = [

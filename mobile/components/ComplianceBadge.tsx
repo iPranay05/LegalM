@@ -3,27 +3,32 @@ import { View, Text, StyleSheet } from "react-native";
 import { Colors } from "./Colors";
 
 interface Props {
-  isCompliant: boolean;
-  score: number;
+  isCompliant?: boolean;
+  score?: number;
+  headline?: "AllPass" | "HasFailures" | "NeedsManualReview";
   size?: "sm" | "lg";
 }
 
-export default function ComplianceBadge({ isCompliant, score, size = "sm" }: Props) {
+export default function ComplianceBadge({ isCompliant, score = 0, headline, size = "sm" }: Props) {
   const isLarge = size === "lg";
+  const status = headline ?? (isCompliant === true ? "AllPass" : isCompliant === false ? "HasFailures" : "NeedsManualReview");
+  const isPass = status === "AllPass";
+  const needsReview = status === "NeedsManualReview";
+  const label = isPass ? "COMPLIANT" : needsReview ? "NEEDS REVIEW" : "NON-COMPLIANT";
 
   return (
     <View style={[styles.container, isLarge && styles.containerLarge,
-      isCompliant ? styles.pass : styles.fail]}>
+      isPass ? styles.pass : needsReview ? styles.review : styles.fail]}>
       <Text style={[styles.icon, isLarge && styles.iconLarge]}>
-        {isCompliant ? "✓" : "✗"}
+        {isPass ? "✓" : needsReview ? "!" : "✗"}
       </Text>
       <View>
         <Text style={[styles.status, isLarge && styles.statusLarge,
-          isCompliant ? styles.passText : styles.failText]}>
-          {isCompliant ? "COMPLIANT" : "NON-COMPLIANT"}
+          isPass ? styles.passText : needsReview ? styles.reviewText : styles.failText]}>
+          {label}
         </Text>
         <Text style={[styles.score, isLarge && styles.scoreLarge,
-          isCompliant ? styles.passText : styles.failText]}>
+          isPass ? styles.passText : needsReview ? styles.reviewText : styles.failText]}>
           Score: {score.toFixed(1)}%
         </Text>
       </View>
@@ -48,6 +53,7 @@ const styles = StyleSheet.create({
   },
   pass: { backgroundColor: Colors.successLight },
   fail: { backgroundColor: Colors.dangerLight },
+  review: { backgroundColor: "#fff3cd" },
   icon: { fontSize: 16, fontWeight: "bold" },
   iconLarge: { fontSize: 28 },
   status: { fontSize: 11, fontWeight: "700", letterSpacing: 0.5 },
@@ -56,4 +62,5 @@ const styles = StyleSheet.create({
   scoreLarge: { fontSize: 13 },
   passText: { color: Colors.success },
   failText: { color: Colors.danger },
+  reviewText: { color: "#b45309" },
 });
