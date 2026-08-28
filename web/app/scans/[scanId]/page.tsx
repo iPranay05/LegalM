@@ -116,7 +116,8 @@ export default function ScanDetailPage() {
     const boxes = scan?.bounding_boxes || [];
     boxes.forEach((box) => {
       let x = 0, y = 0, w = 0, h = 0;
-      const rawBox = box.bbox;
+      // Backend accepts both legacy arrays and normalized object boxes.
+      const rawBox: any = box.bbox;
       if (!rawBox) return;
 
       if (typeof rawBox === "object" && !Array.isArray(rawBox)) {
@@ -144,7 +145,7 @@ export default function ScanDetailPage() {
       if (w <= 0 || h <= 0) return;
 
       const conf = box.confidence != null ? (box.confidence > 1 ? box.confidence / 100 : box.confidence) : 0;
-      const isVision = box.bbox_source === "vision_estimate" || (typeof rawBox === "object" && (rawBox as any).bbox_source === "vision_estimate");
+      const isVision = (box as any).bbox_source === "vision_estimate" || (typeof rawBox === "object" && rawBox.bbox_source === "vision_estimate");
 
       // Confidence-color: Green >= 70%, Amber 40-70%, Red < 40%
       let strokeColor = "#1a7a3c";

@@ -1,12 +1,12 @@
 "use client";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import api from "@/lib/api";
 import { RelaxationOrder, Rule, CATEGORIES } from "@/lib/types";
 import { formatDate } from "@/lib/utils";
 
-export default function RelaxationsPage() {
+function RelaxationsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [orders, setOrders] = useState<RelaxationOrder[]>([]);
@@ -196,4 +196,8 @@ export default function RelaxationsPage() {
       </div>
     </div>
   );
+}
+
+export default function RelaxationsPage() {
+  return <Suspense fallback={<div className="p-6 text-sm text-gray-500">Loading relaxation orders…</div>}><RelaxationsContent /></Suspense>;
 }
