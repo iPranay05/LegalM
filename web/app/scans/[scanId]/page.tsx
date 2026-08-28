@@ -24,6 +24,7 @@ export default function ScanDetailPage() {
   const [scan, setScan] = useState<Scan | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
+  const [pipelineStatus, setPipelineStatus] = useState<string>("pending");
   const [activeTab, setActiveTab] = useState<Tab>("all");
   const [showOcr, setShowOcr] = useState(false);
   const [generatingReport, setGeneratingReport] = useState<"pdf" | "docx" | null>(null);
@@ -41,7 +42,46 @@ export default function ScanDetailPage() {
 
   useEffect(() => {
     if (!localStorage.getItem("auth_token")) { router.push("/login"); return; }
-    loadAll();
+    let intervalId: NodeJS.Timeout | null = null;
+
+    async function checkStatusAndLoad() {
+      try {
+        const statusRes = await api.get<{ scan_id: string; pipeline_status: string; review_status: string }>(`/scan/${scanId}/status`);
+        const status = statusRes.data.pipeline_status;
+        setPipelineStatus(status);
+
+        if (status === "pending" || status === "processing") {
+          if (!intervalId) {
+            intervalId = setInterval(async () => {
+              try {
+                const polled = await api.get<{ scan_id: string; pipeline_status: string; review_status: string }>(`/scan/${scanId}/status`);
+                setPipelineStatus(polled.data.pipeline_status);
+                if (polled.data.pipeline_status !== "pending" && polled.data.pipeline_status !== "processing") {
+                  if (intervalId) clearInterval(intervalId);
+                  await loadAll();
+                }
+              } catch (err) {
+                // Keep polling or handle error
+              }
+            }, 5000);
+          }
+        } else {
+          await loadAll();
+        }
+      } catch (e: any) {
+        if (e?.response?.status === 401) {
+          router.push("/login");
+          return;
+        }
+        await loadAll();
+      }
+    }
+
+    checkStatusAndLoad();
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
   }, [scanId]);
 
   async function loadAll() {
@@ -53,6 +93,7 @@ export default function ScanDetailPage() {
       ]);
       setTabs(tabRes.data);
       setScan(tabRes.data.scan);
+      setPipelineStatus(tabRes.data.scan.pipeline_status || "complete");
       setReports(rptRes.data);
     } catch (e: any) {
       if (e?.response?.status === 401) router.push("/login");
@@ -171,21 +212,45 @@ export default function ScanDetailPage() {
     }
   }
 
-  if (loading) return (
-    <div className="flex items-center justify-center h-64 gap-3 text-gray-400">
-      <svg className="animate-spin h-5 w-5 text-gov-navy" viewBox="0 0 24 24" fill="none">
-        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-      </svg>
-      Loading scan…
-    </div>
-  );
+  if (pipelineStatus === "pending" || pipelineStatus === "processing") {
+    return (
+      <div className="max-w-2xl mx-auto my-12 bg-white rounded-2xl border border-gray-200 p-8 text-center shadow-sm space-y-4">
+        <div className="inline-flex p-3 rounded-full bg-blue-50 text-blue-600 animate-pulse">
+          <svg className="animate-spin h-8 w-8 text-gov-navy" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+          </svg>
+        </div>
+        <h2 className="text-xl font-bold text-gray-900">Processing Perception Pipeline</h2>
+        <p className="text-sm text-gray-600 max-w-md mx-auto">
+          Extracting text, calibrating physical font measurements, and evaluating Legal Metrology declaration rules in the background…
+        </p>
+        <div className="inline-block px-3 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded-full text-xs font-semibold uppercase tracking-wider">
+          Status: {pipelineStatus}
+        </div>
+      </div>
+    );
+  }
 
-  if (!scan || !tabs) return (
-    <div className="text-center py-12 text-gray-400">
-      Scan not found. <Link href="/scans" className="text-gov-navy underline">Back to scans</Link>
-    </div>
-  );
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64 gap-3 text-gray-400">
+        <svg className="animate-spin h-5 w-5 text-gov-navy" viewBox="0 0 24 24" fill="none">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+        </svg>
+        Loading scan…
+      </div>
+    );
+  }
+
+  if (!scan || !tabs) {
+    return (
+      <div className="text-center py-12 text-gray-400">
+        Scan not found. <Link href="/scans" className="text-gov-navy underline">Back to scans</Link>
+      </div>
+    );
+  }
 
   const imageUrl = scan.image_path
     ? `${API_BASE_URL}/uploads/${scan.image_path.split(/[\\/]/).pop()}`
@@ -462,6 +527,14 @@ export default function ScanDetailPage() {
                           <option value="compliant">Compliant</option>
                         </select>
                       </div>
+                    </div>
+                    <div>
+                      <label className="form-label">Description *</label>
+                      <textarea value={findingForm.description}
+                        onChange={(e) => setFindingForm(f => ({ ...f, description: e.target.value }))}
+                        rows={2} required className="form-input" placeholder="Describe the finding…" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
                       <div>
                         <label className="form-label">Severity</label>
                         <select value={findingForm.severity}
@@ -473,49 +546,44 @@ export default function ScanDetailPage() {
                           <option value="critical">Critical</option>
                         </select>
                       </div>
+                      <div>
+                        <label className="form-label">Evidence Note</label>
+                        <input value={findingForm.evidence_note}
+                          onChange={(e) => setFindingForm(f => ({ ...f, evidence_note: e.target.value }))}
+                          className="form-input" placeholder="Photo reference, physical notes…" />
+                      </div>
                     </div>
-                    <div>
-                      <label className="form-label">Description *</label>
-                      <textarea required value={findingForm.description}
-                        onChange={(e) => setFindingForm(f => ({ ...f, description: e.target.value }))}
-                        className="form-input" rows={2} placeholder="Describe the finding…" />
+                    <div className="flex justify-end gap-2">
+                      <button type="button" onClick={() => setFindingForm(f => ({ ...f, show: false }))} className="gov-btn-secondary text-xs px-3 py-1.5">Cancel</button>
+                      <button type="submit" disabled={submittingFinding} className="gov-btn text-xs px-4 py-1.5">
+                        {submittingFinding ? "Saving…" : "Save Finding"}
+                      </button>
                     </div>
-                    <div>
-                      <label className="form-label">Evidence Note</label>
-                      <input value={findingForm.evidence_note}
-                        onChange={(e) => setFindingForm(f => ({ ...f, evidence_note: e.target.value }))}
-                        className="form-input" placeholder="Optional evidence reference…" />
-                    </div>
-                    <button type="submit" disabled={submittingFinding} className="gov-btn text-xs disabled:opacity-50">
-                      {submittingFinding ? "Saving…" : "Save Finding"}
-                    </button>
                   </form>
                 )}
 
                 {/* Findings list */}
                 {tabs.manual_findings.length === 0 ? (
-                  <div className="text-center py-8 text-gray-400 text-sm">No manual findings recorded.</div>
+                  <div className="text-center py-10 text-gray-400 text-sm">
+                    No manual findings recorded. Click "+ Add Finding" to record field inspection observations.
+                  </div>
                 ) : (
                   <div className="divide-y divide-gray-100">
                     {tabs.manual_findings.map((f) => (
-                      <div key={f.id} className="px-5 py-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 flex-wrap mb-1">
-                              {f.rule_code && (
-                                <span className="text-[10px] font-bold text-gov-navy font-mono bg-blue-50 border border-blue-100 px-1.5 py-0.5 rounded">{f.rule_code}</span>
-                              )}
-                              <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full border capitalize",
-                                SEVERITY_COLORS[f.severity] || "bg-gray-100 text-gray-700 border-gray-300"
-                              )}>{f.severity}</span>
-                              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">{f.finding_type}</span>
-                            </div>
-                            <p className="text-sm text-gray-800">{f.description}</p>
-                            {f.evidence_note && <p className="text-xs text-gray-400 mt-1 italic">{f.evidence_note}</p>}
-                            <p className="text-xs text-gray-400 mt-1">{formatDate(f.recorded_at)}</p>
+                      <div key={f.id} className="px-5 py-3.5 flex items-start justify-between gap-4">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase",
+                              SEVERITY_COLORS[f.severity] || "bg-gray-100 text-gray-600 border-gray-200")}>
+                              {f.severity}
+                            </span>
+                            <span className="text-xs font-bold text-gray-700 uppercase">{f.finding_type}</span>
+                            {f.rule_code && <span className="text-xs font-mono text-gray-400">{f.rule_code}</span>}
                           </div>
-                          <button onClick={() => deleteFinding(f.id)} className="text-xs text-red-500 hover:underline shrink-0">Remove</button>
+                          <p className="text-sm text-gray-800">{f.description}</p>
+                          {f.evidence_note && <p className="text-xs text-gray-400 italic">{f.evidence_note}</p>}
                         </div>
+                        <button onClick={() => deleteFinding(f.id)} className="text-gray-300 hover:text-red-600 text-sm">✕</button>
                       </div>
                     ))}
                   </div>
@@ -524,140 +592,97 @@ export default function ScanDetailPage() {
             )}
           </div>
 
-          {/* Remarks */}
-          {scan.remarks && (
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 border-l-4 border-l-gov-navy">
-              <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Compliance Remarks</h2>
-              <p className="text-sm text-gray-700 leading-relaxed">{scan.remarks}</p>
-            </div>
-          )}
-
-          {/* Raw OCR */}
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
+          {/* OCR text drawer */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
             <button
-              onClick={() => setShowOcr((v) => !v)}
-              className="w-full flex items-center justify-between px-5 py-4 text-sm font-semibold text-gray-600 hover:bg-gray-50 transition"
+              onClick={() => setShowOcr(s => !s)}
+              className="flex items-center justify-between w-full text-left"
             >
-              <span>Raw OCR Text</span>
-              <span className="text-gray-400">{showOcr ? "▲" : "▼"}</span>
+              <div>
+                <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Raw OCR Text</span>
+                <p className="text-xs text-gray-400 mt-0.5">Extracted using Tesseract OCR + Groq Vision</p>
+              </div>
+              <span className="text-xs text-gov-navy font-semibold">{showOcr ? "Hide ▲" : "Show ▼"}</span>
             </button>
             {showOcr && (
-              <div className="px-5 pb-5">
-                <pre className="bg-gray-900 text-green-400 text-xs font-mono rounded-lg p-4 overflow-x-auto whitespace-pre-wrap leading-5">
-                  {scan.raw_ocr_text || "No text extracted."}
-                </pre>
-              </div>
+              <pre className="mt-4 p-4 bg-gray-50 rounded-lg text-xs font-mono text-gray-700 whitespace-pre-wrap max-h-60 overflow-y-auto border border-gray-200">
+                {scan.raw_ocr_text || "No text extracted."}
+              </pre>
             )}
           </div>
         </div>
 
-        {/* Right column */}
-        <div className="space-y-4">
+        {/* Right: Label image + Bounding boxes + Actions */}
+        <div className="space-y-5">
 
-          {/* Image with bbox overlay */}
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-            <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3">
-              Scanned Label
-              {(scan.bounding_boxes?.length ?? 0) > 0 && (
-                <span className="ml-2 text-[10px] font-normal text-gray-400">
-                  ({scan.bounding_boxes?.filter(b => b.bbox).length} annotations)
-                </span>
-              )}
-            </h2>
+          {/* Label photo with bounding boxes */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+            <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3">Product Label Photo</h2>
             {imageUrl ? (
-              <div className="relative">
+              <div className="relative rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   ref={imgRef}
                   src={imageUrl}
-                  alt="Product label"
-                  className="w-full rounded-lg border border-gray-100 object-contain max-h-96"
+                  alt={scan.product_name || "Label"}
+                  className="w-full object-contain max-h-72"
                   onLoad={drawBboxOverlays}
                 />
                 <canvas
                   ref={canvasRef}
-                  className="absolute inset-0 w-full h-full rounded-lg pointer-events-none"
-                  style={{ maxHeight: "24rem" }}
+                  className="absolute inset-0 w-full h-full pointer-events-none"
                 />
               </div>
             ) : (
-              <div className="w-full h-48 bg-gray-100 rounded-lg flex items-center justify-center text-gray-400 text-sm">
+              <div className="h-48 bg-gray-50 rounded-lg flex items-center justify-center text-gray-300 text-sm">
                 No image available
               </div>
             )}
 
-            {/* Bbox legend */}
-            {(scan.bounding_boxes?.length ?? 0) > 0 && (
-              <div className="mt-2 flex items-center gap-4 text-xs text-gray-500">
-                <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm bg-green-600"></span> Confirmed</span>
-                <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm bg-orange-400"></span> Needs review</span>
-              </div>
-            )}
-          </div>
-
-          {/* Bounding box review panel */}
-          {unconfirmedBoxes.length > 0 && (
-            <div className="bg-amber-50 rounded-xl border border-amber-200 shadow-sm p-4">
-              <h2 className="text-xs font-bold text-amber-800 uppercase tracking-wide mb-3">
-                ⚠ {unconfirmedBoxes.length} Annotation{unconfirmedBoxes.length > 1 ? "s" : ""} Need Confirmation
-              </h2>
-              <div className="space-y-3">
-                {unconfirmedBoxes.map((box) => (
-                  <div key={box.field} className="bg-white rounded-lg border border-amber-100 p-3">
-                    <p className="text-xs font-bold text-gray-700 mb-1">
-                      {FIELD_LABELS[box.field] || box.field}
-                    </p>
-                    <p className="text-xs text-gray-500 mb-2 font-mono">
-                      Extracted: <span className="text-gray-800">{box.text || "—"}</span>
-                      <span className="ml-2 text-amber-600">({Math.round(box.confidence * 100)}% conf.)</span>
-                    </p>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => confirmBbox(box.field)}
-                        disabled={confirmingBbox === box.field}
-                        className="text-xs bg-green-600 text-white px-2.5 py-1 rounded font-semibold hover:bg-green-700 disabled:opacity-50"
-                      >
-                        {confirmingBbox === box.field ? "…" : "Confirm"}
-                      </button>
-                      <button
-                        onClick={() => {
-                          const val = prompt(`Correct value for "${FIELD_LABELS[box.field] || box.field}":`, box.text || "");
-                          if (val !== null) confirmBbox(box.field, val);
-                        }}
-                        className="text-xs bg-white border border-amber-300 text-amber-700 px-2.5 py-1 rounded font-semibold hover:bg-amber-50"
-                      >
-                        Correct
-                      </button>
+            {/* Bounding box review list */}
+            {scan.bounding_boxes && scan.bounding_boxes.length > 0 && (
+              <div className="mt-4 space-y-2">
+                <p className="text-xs font-bold text-gray-500 uppercase">Detection Bounding Boxes</p>
+                {scan.bounding_boxes.map((b) => (
+                  <div
+                    key={b.field}
+                    className={cn(
+                      "flex items-center justify-between rounded-lg p-2.5 text-xs border",
+                      b.confirmed ? "bg-green-50/50 border-green-200" : "bg-amber-50/50 border-amber-200"
+                    )}
+                  >
+                    <div>
+                      <span className="font-bold text-gray-700">{FIELD_LABELS[b.field] || b.field}</span>
+                      {b.text && <p className="text-gray-500 font-mono text-[11px] mt-0.5">{b.text}</p>}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={cn("text-[10px] font-bold px-1.5 py-0.5 rounded",
+                        b.confirmed ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"
+                      )}>
+                        {b.confirmed ? "✓ Confirmed" : "Review"}
+                      </span>
+                      {!b.confirmed && (
+                        <button
+                          disabled={confirmingBbox === b.field}
+                          onClick={() => confirmBbox(b.field)}
+                          className="text-[11px] bg-gov-navy text-white px-2 py-0.5 rounded hover:bg-gov-navy-light disabled:opacity-50"
+                        >
+                          Confirm
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
-          {/* Pipeline intelligence: Barcode + Groq */}
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
-            <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wide">Pipeline Intelligence</h2>
-
-            {/* Groq status */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-base">🤖</span>
-                <div>
-                  <p className="text-sm font-semibold text-gray-700">Groq LLM Extraction</p>
-                  <p className="text-xs text-gray-400">Structured field parsing from OCR text</p>
-                </div>
-              </div>
-              {scan.groq_used
-                ? <span className="text-[10px] font-bold px-2 py-1 rounded-full bg-green-50 text-green-700 border border-green-200">✓ Used</span>
-                : <span className="text-[10px] font-bold px-2 py-1 rounded-full bg-gray-100 text-gray-400 border border-gray-200">Not used</span>
-              }
-            </div>
-
-            {/* Barcode status */}
-            <div className="border-t border-gray-100 pt-4">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="text-base">📊</span>
+          {/* Barcode details */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+            <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3">Barcode & External Registry</h2>
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">{scan.barcode_data?.decoded ? "📦" : "🔍"}</span>
                 <div>
                   <p className="text-sm font-semibold text-gray-700">Barcode Detection</p>
                   <p className="text-xs text-gray-400">

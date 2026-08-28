@@ -22,7 +22,7 @@ const REQUIRED_FIELDS = new Set([
 
 export default function ResultScreen() {
   const router = useRouter();
-  const { data } = useLocalSearchParams<{ data: string }>();
+  const { data, scan_id: paramScanId } = useLocalSearchParams<{ data?: string; scan_id?: string }>();
   const [activeTab, setActiveTab] = useState<Tab>("all");
   const [showOcr, setShowOcr] = useState(false);
   const [tabs, setTabs] = useState<ScanResultTabs | null>(null);
@@ -36,44 +36,82 @@ export default function ResultScreen() {
     severity: "medium" as "low" | "medium" | "high" | "critical",
   });
 
-  if (!data) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.errorText}>No result data found.</Text>
-        <TouchableOpacity onPress={() => router.back()}>
-          <Text style={{ color: Colors.primary, fontWeight: "600" }}>Go Back</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
+  const parsedInitial = data ? (() => { try { return JSON.parse(data); } catch { return null; } })() : null;
+  const [result, setResult] = useState<ComplianceResult | null>(parsedInitial);
+  const effectiveScanId = paramScanId || parsedInitial?.scan_id;
+  const [pipelineStatus, setPipelineStatus] = useState<string>(parsedInitial?.pipeline_status || "pending");
 
-  const result: ComplianceResult = JSON.parse(data);
-
-  // Load four-tab data from server
   useEffect(() => {
-    if (result.scan_id) {
-      setLoadingTabs(true);
-      api.get<ScanResultTabs>(`/scan/${result.scan_id}/result-tabs`)
-        .then((r) => setTabs(r.data))
-        .catch(() => {}) // graceful — falls back to inline field_results
-        .finally(() => setLoadingTabs(false));
+    if (!effectiveScanId) return;
+
+    let intervalId: NodeJS.Timeout | null = null;
+
+    async function checkStatusAndFetch() {
+      try {
+        const statusRes = await api.get<{ scan_id: string; pipeline_status: string; review_status: string }>(`/scan/${effectiveScanId}/status`);
+        const status = statusRes.data.pipeline_status;
+        setPipelineStatus(status);
+
+        if (status === "pending" || status === "processing") {
+          intervalId = setInterval(async () => {
+            try {
+              const polled = await api.get<{ scan_id: string; pipeline_status: string; review_status: string }>(`/scan/${effectiveScanId}/status`);
+              setPipelineStatus(polled.data.pipeline_status);
+              if (polled.data.pipeline_status !== "pending" && polled.data.pipeline_status !== "processing") {
+                if (intervalId) clearInterval(intervalId);
+                await loadFullResult();
+              }
+            } catch (err) {
+              // keep polling
+            }
+          }, 3000);
+        } else {
+          await loadFullResult();
+        }
+      } catch (err) {
+        await loadFullResult();
+      }
     }
-  }, [result.scan_id]);
+
+    async function loadFullResult() {
+      setLoadingTabs(true);
+      try {
+        const [scanRes, tabRes] = await Promise.all([
+          api.get<ComplianceResult>(`/scan/${effectiveScanId}`),
+          api.get<ScanResultTabs>(`/scan/${effectiveScanId}/result-tabs`).catch(() => ({ data: null })),
+        ]);
+        setResult(scanRes.data);
+        setPipelineStatus(scanRes.data.pipeline_status || "complete");
+        if (tabRes.data) setTabs(tabRes.data);
+      } catch (e) {
+        // graceful
+      } finally {
+        setLoadingTabs(false);
+      }
+    }
+
+    checkStatusAndFetch();
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [effectiveScanId]);
 
   async function shareResult() {
+    if (!result) return;
     const status = result.is_compliant ? "COMPLIANT ✓" : "NON-COMPLIANT ✗";
     await Share.share({
       message:
         `Legal Metrology Compliance Check\n` +
         `Scan ID: ${result.scan_id}\nStatus: ${status}\n` +
-        `Score: ${result.compliance_score.toFixed(1)}%\n\n` +
-        `Missing: ${result.missing_fields.length > 0 ? result.missing_fields.join(", ") : "None"}\n\n` +
-        `Remarks: ${result.remarks}`,
+        `Score: ${result.compliance_score?.toFixed(1) ?? 0}%\n\n` +
+        `Missing: ${result.missing_fields?.length ? result.missing_fields.join(", ") : "None"}\n\n` +
+        `Remarks: ${result.remarks || "—"}`,
     });
   }
 
   async function submitFinding() {
-    if (!findingForm.description.trim()) {
+    if (!result || !findingForm.description.trim()) {
       Alert.alert("Required", "Please enter a description for the finding.");
       return;
     }
@@ -87,7 +125,6 @@ export default function ResultScreen() {
       });
       setShowFindingForm(false);
       setFindingForm({ rule_code: "", finding_type: "violation", description: "", severity: "medium" });
-      // Reload tabs
       const r = await api.get<ScanResultTabs>(`/scan/${result.scan_id}/result-tabs`);
       setTabs(r.data);
       Alert.alert("Saved", "Manual finding recorded.");
@@ -99,6 +136,7 @@ export default function ResultScreen() {
   }
 
   async function deleteFinding(findingId: number) {
+    if (!result) return;
     Alert.alert("Delete Finding", "Remove this finding?", [
       { text: "Cancel", style: "cancel" },
       {
@@ -114,7 +152,35 @@ export default function ResultScreen() {
     ]);
   }
 
-  const allRules = tabs?.all_rules || Object.entries(result.field_results).map(([key, present]) => ({
+  if (pipelineStatus === "pending" || pipelineStatus === "processing") {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color={Colors.primary} />
+          <Text style={[styles.topTitle, { marginTop: 16 }]}>Processing Perception Pipeline</Text>
+          <Text style={{ color: Colors.textSecondary, textAlign: "center", paddingHorizontal: 32, fontSize: 13, marginTop: 6 }}>
+            Extracting text declarations, calibrating font size, and evaluating Legal Metrology rules in the background…
+          </Text>
+          <View style={[styles.symbolPill, styles.symbolPillOrange, { marginTop: 16 }]}>
+            <Text style={styles.symbolText}>Status: {pipelineStatus.toUpperCase()}</Text>
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!result) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.errorText}>No result data found.</Text>
+        <TouchableOpacity onPress={() => router.back()}>
+          <Text style={{ color: Colors.primary, fontWeight: "600" }}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  const allRules = tabs?.all_rules || Object.entries(result.field_results || {}).map(([key, present]) => ({
     key, label: FIELD_LABELS[key] || key, required: REQUIRED_FIELDS.has(key),
     weight: 10, present, extracted_value: result.extracted_fields?.[key],
   }));
@@ -150,12 +216,12 @@ export default function ResultScreen() {
             <View style={styles.scoreBarBg}>
               <View style={[
                 styles.scoreBarFill,
-                { width: `${Math.min(result.compliance_score, 100)}%` as any },
+                { width: `${Math.min(result.compliance_score || 0, 100)}%` as any },
                 result.is_compliant ? styles.scoreBarPass : styles.scoreBarFail,
               ]} />
             </View>
             <Text style={styles.scoreBarLabel}>
-              {result.mandatory_fields_present}/{result.total_mandatory_fields} mandatory fields · {result.compliance_score.toFixed(1)}%
+              {result.mandatory_fields_present || 0}/{result.total_mandatory_fields || 0} mandatory fields · {(result.compliance_score || 0).toFixed(1)}%
             </Text>
           </View>
 
@@ -185,15 +251,15 @@ export default function ResultScreen() {
         {/* Remarks */}
         <View style={styles.remarksCard}>
           <Text style={styles.sectionLabel}>Inspector Remarks</Text>
-          <Text style={styles.remarksText}>{result.remarks}</Text>
+          <Text style={styles.remarksText}>{result.remarks || "No remarks"}</Text>
         </View>
 
         {/* Meta */}
         <View style={styles.metaCard}>
           {[
             { k: "Scan ID", v: result.scan_id.substring(0, 20) + "…" },
-            { k: "OCR Confidence", v: `${result.ocr_confidence.toFixed(1)}%` },
-            { k: "Fields Checked", v: String(result.total_fields_checked) },
+            { k: "OCR Confidence", v: `${(result.ocr_confidence || 0).toFixed(1)}%` },
+            { k: "Fields Checked", v: String(result.total_fields_checked || 0) },
             ...(result.calibration_method ? [{ k: "Calibration", v: result.calibration_method }] : []),
           ].map(({ k, v }) => (
             <View key={k} style={styles.metaRow}>
@@ -545,6 +611,32 @@ const styles = StyleSheet.create({
   metaRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   metaKey: { fontSize: 12, color: Colors.textSecondary },
   metaVal: { fontSize: 12, color: Colors.text, fontWeight: "600" },
+
+  // Intelligence card
+  intelligenceCard: {
+    backgroundColor: Colors.white, borderRadius: 12, padding: 16, marginBottom: 12,
+  },
+  intelRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  intelIcon: { fontSize: 20 },
+  intelTitle: { fontSize: 13, fontWeight: "700", color: Colors.text },
+  intelSub: { fontSize: 11, color: Colors.textSecondary, marginTop: 1 },
+  intelBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
+  intelBadgeOn: { backgroundColor: "#e8f5e9" },
+  intelBadgeOff: { backgroundColor: "#f5f5f5" },
+  intelBadgeText: { fontSize: 11, fontWeight: "700" },
+  intelBadgeTextOn: { color: "#2e7d32" },
+  intelBadgeTextOff: { color: "#9e9e9e" },
+  barcodeList: { marginTop: 10, gap: 6 },
+  barcodeRow: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: Colors.offWhite, padding: 8, borderRadius: 6 },
+  barcodeTypeBadge: { backgroundColor: Colors.primaryLight, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  barcodeTypeText: { fontSize: 10, fontWeight: "700", color: Colors.primary },
+  barcodeValue: { flex: 1, fontSize: 12, fontFamily: "monospace", color: Colors.text },
+  barcodePrimary: { fontSize: 10, color: Colors.textSecondary, fontWeight: "600" },
+  offCard: { backgroundColor: "#e3f2fd", padding: 10, borderRadius: 6, marginTop: 6, gap: 4 },
+  offTitle: { fontSize: 11, fontWeight: "700", color: "#1565c0", marginBottom: 2 },
+  offRow: { flexDirection: "row", gap: 8 },
+  offKey: { fontSize: 10, color: "#1976d2", fontWeight: "600", width: 60 },
+  offVal: { flex: 1, fontSize: 11, color: Colors.text },
 
   // Four-tab section
   tabSection: { backgroundColor: Colors.white, borderRadius: 12, marginBottom: 12, overflow: "hidden" },

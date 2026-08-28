@@ -169,6 +169,14 @@ class ScanOut(BaseModel):
         from_attributes = True
 
 
+class ScanStatusOut(BaseModel):
+    scan_id: str
+    pipeline_status: Optional[str] = "pending"
+    review_status: Optional[str] = "pending"
+    class Config:
+        from_attributes = True
+
+
 class ScanResultFourTab(BaseModel):
     scan: ScanOut
     all_rules: List[dict]
@@ -177,7 +185,20 @@ class ScanResultFourTab(BaseModel):
     manual_findings: List[ManualFindingOut]
 
 
-# ── Upload and run pipeline ────────────────────────────────────────────────────
+# ── Status and Upload endpoints ────────────────────────────────────────────────
+
+@router.get("/{scan_id}/status", response_model=ScanStatusOut)
+def get_scan_status(
+    scan_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Lightweight endpoint returning scan processing status for polling."""
+    scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return scan
+
 
 @router.post("/upload", response_model=ScanOut, status_code=201)
 async def upload_and_scan(
@@ -206,54 +227,13 @@ async def upload_and_scan(
     async with aiofiles.open(image_path, "wb") as f:
         await f.write(image_bytes)
 
-    from app.services.pipeline_service import run_pipeline_sync
-    from PIL import Image
-    import io as _io
-    pil = Image.open(_io.BytesIO(image_bytes))
-    img_w, img_h = pil.size
-
-    pipeline_result = run_pipeline_sync(
-        image_bytes, category=category or "general",
-        inspector_width_mm=label_width_mm, inspector_height_mm=label_height_mm,
-        img_width_px=img_w, img_height_px=img_h,
-    )
-
-    # Priority order for product_name + brand_name:
-    #   1. Groq extraction (most accurate)
-    #   2. Barcode lookup (Open Food Facts)
-    #   3. OCR first line (last resort, only if confidence ≥ 50%)
-    extracted = pipeline_result.get("extracted_fields") or {}
-    barcode_data = pipeline_result.get("barcode_data") or {}
-    barcode_product = barcode_data.get("product_info") or {}
-
-    product_name = (
-        extracted.get("product_name")
-        or barcode_product.get("product_name")
-        or None
-    )
-    brand_name = (
-        extracted.get("brand_name")
-        or barcode_product.get("brand_name")
-        or None
-    )
-
-    if not product_name:
-        raw_text = pipeline_result.get("raw_ocr_text", "")
-        ocr_confidence = pipeline_result.get("ocr_confidence", 0) or 0
-        if raw_text and ocr_confidence >= 50:
-            lines = [l.strip() for l in raw_text.splitlines()
-                     if len(l.strip()) > 3 and l.strip().replace(" ", "").isascii()]
-            product_name = lines[0][:60] if lines else None
-
-    cat_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike(category.strip())).first() if category else None
+    cat_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike((category or "general").strip())).first() if category else None
     cat_id = cat_obj.id if cat_obj else None
 
     scan = Scan(
         scan_id=scan_id,
         inspector_id=current_user.id if current_user else None,
-        product_name=product_name,
-        brand_name=brand_name,
-        category=category,
+        category=category or "general",
         commodity_category_id=cat_id,
         shop_name=shop_name,
         location=location,
@@ -261,29 +241,25 @@ async def upload_and_scan(
         district=district,
         image_path=image_path,
         image_paths=[image_path],
-        raw_ocr_text=pipeline_result.get("raw_ocr_text"),
-        ocr_confidence=pipeline_result.get("ocr_confidence"),
-        ocr_language=pipeline_result.get("ocr_language"),
-        calibration_method=pipeline_result.get("calibration_method"),
-        calibration_data=pipeline_result.get("calibration_data"),
-        symbols_detected=pipeline_result.get("symbols_detected"),
-        barcode_data=barcode_data,
-        groq_used=pipeline_result.get("groq_used", False),
-        bounding_boxes=pipeline_result.get("bounding_boxes"),
-        pipeline_status=pipeline_result.get("pipeline_status", "complete"),
-        is_compliant=pipeline_result.get("is_compliant"),
-        compliance_score=pipeline_result.get("compliance_score"),
-        field_results=pipeline_result.get("field_results"),
-        missing_fields=pipeline_result.get("missing_fields"),
-        extracted_fields=pipeline_result.get("extracted_fields"),
-        remarks=pipeline_result.get("remarks"),
+        pipeline_status="pending",
+        review_status="pending",
     )
     db.add(scan)
-    db.flush()
-    _persist_compliance_checks(db, scan.scan_id, pipeline_result.get("compliance_checks", []))
-    _upsert_product(db, product_name, category or "general", scan)
     db.commit()
     db.refresh(scan)
+
+    # Enqueue Celery task asynchronously
+    from app.services.pipeline_service import run_pipeline_task
+    try:
+        run_pipeline_task.delay(scan.scan_id, image_path, scan.category or "general")
+    except Exception as e:
+        scan.pipeline_status = "failed"
+        db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail="Perception pipeline unavailable. Background worker queue could not be reached."
+        )
+
     return scan
 
 
@@ -306,7 +282,6 @@ async def upload_multi_and_scan(
     scan_id = str(uuid.uuid4())
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     saved_paths = []
-    all_bytes = []
 
     for i, upload in enumerate(files):
         if upload.content_type not in ALLOWED_TYPES:
@@ -319,63 +294,14 @@ async def upload_multi_and_scan(
         async with aiofiles.open(fpath, "wb") as f:
             await f.write(img_bytes)
         saved_paths.append(fpath)
-        all_bytes.append(img_bytes)
 
-    from app.services.pipeline_service import run_pipeline_sync
-    pipeline_result = run_pipeline_sync(all_bytes[0], category=category or "general")
-
-    if len(all_bytes) > 1:
-        from app.services.ocr_service import extract_text_from_bytes
-        combined_text = pipeline_result.get("raw_ocr_text", "")
-        combined_confidences = {}
-        for extra_bytes in all_bytes[1:]:
-            extra_ocr = extract_text_from_bytes(extra_bytes)
-            combined_text += "\n" + extra_ocr.get("text", "")
-            combined_confidences.update(extra_ocr.get("field_confidences") or {})
-        from app.services.pipeline_service import run_classifier_stage
-        re_compliance = run_classifier_stage({
-            "ocr_text": combined_text,
-            "category": category or "general",
-            "symbols": pipeline_result.get("symbols_detected") or {},
-            "calibration": {},
-            "extracted_fields": pipeline_result.get("extracted_fields") or {},
-            "field_confidences": combined_confidences,
-            "overall_confidence": pipeline_result.get("ocr_confidence"),
-            "low_confidence": pipeline_result.get("low_confidence_ocr"),
-        })
-        pipeline_result.update({
-            "raw_ocr_text": combined_text,
-            "is_compliant": re_compliance["is_compliant"],
-            "compliance_score": re_compliance["compliance_score"],
-            "field_results": re_compliance["field_results"],
-            "missing_fields": re_compliance["missing_fields"],
-            "extracted_fields": re_compliance["extracted_fields"],
-            "compliance_checks": re_compliance["compliance_checks"],
-            "compliance_summary": re_compliance["compliance_summary"],
-            "remarks": re_compliance["remarks"],
-        })
-
-    extracted = pipeline_result.get("extracted_fields") or {}
-    product_name = extracted.get("product_name") or None
-    brand_name = extracted.get("brand_name") or None
-
-    if not product_name:
-        raw_text = pipeline_result.get("raw_ocr_text", "")
-        ocr_confidence = pipeline_result.get("ocr_confidence", 0) or 0
-        if raw_text and ocr_confidence >= 50:
-            lines = [l.strip() for l in raw_text.splitlines()
-                     if len(l.strip()) > 3 and l.strip().replace(" ", "").isascii()]
-            product_name = lines[0][:60] if lines else None
-
-    cat_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike(category.strip())).first() if category else None
+    cat_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike((category or "general").strip())).first() if category else None
     cat_id = cat_obj.id if cat_obj else None
 
     scan = Scan(
         scan_id=scan_id,
         inspector_id=current_user.id if current_user else None,
-        product_name=product_name,
-        brand_name=brand_name,
-        category=category,
+        category=category or "general",
         commodity_category_id=cat_id,
         shop_name=shop_name,
         location=location,
@@ -383,26 +309,25 @@ async def upload_multi_and_scan(
         district=district,
         image_path=saved_paths[0],
         image_paths=saved_paths,
-        raw_ocr_text=pipeline_result.get("raw_ocr_text"),
-        ocr_confidence=pipeline_result.get("ocr_confidence"),
-        ocr_language=pipeline_result.get("ocr_language"),
-        calibration_method=pipeline_result.get("calibration_method"),
-        symbols_detected=pipeline_result.get("symbols_detected"),
-        bounding_boxes=pipeline_result.get("bounding_boxes"),
-        pipeline_status=pipeline_result.get("pipeline_status", "complete"),
-        is_compliant=pipeline_result.get("is_compliant"),
-        compliance_score=pipeline_result.get("compliance_score"),
-        field_results=pipeline_result.get("field_results"),
-        missing_fields=pipeline_result.get("missing_fields"),
-        extracted_fields=pipeline_result.get("extracted_fields"),
-        remarks=pipeline_result.get("remarks"),
+        pipeline_status="pending",
+        review_status="pending",
     )
     db.add(scan)
-    db.flush()
-    _persist_compliance_checks(db, scan.scan_id, pipeline_result.get("compliance_checks", []))
-    _upsert_product(db, product_name, category or "general", scan)
     db.commit()
     db.refresh(scan)
+
+    # Enqueue Celery task asynchronously
+    from app.services.pipeline_service import run_pipeline_task
+    try:
+        run_pipeline_task.delay(scan.scan_id, saved_paths[0], scan.category or "general")
+    except Exception as e:
+        scan.pipeline_status = "failed"
+        db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail="Perception pipeline unavailable. Background worker queue could not be reached."
+        )
+
     return scan
 
 

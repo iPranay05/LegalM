@@ -2,36 +2,31 @@
 Perception Pipeline Service
 Orchestrates: OCR → calibration + symbol detection (parallel) → classifier
 
-With Celery: tasks run async, scan.pipeline_status updated via DB.
-Without Celery: runs synchronously in the same thread (graceful fallback).
+Mandatory Asynchronous Pipeline (Celery + Redis).
+Every scan upload enqueues a background task and immediately returns a pending scan.
+No synchronous Perception fallback is permitted.
 
 Stages:
   1. OCR (English + Hindi/Devanagari) with confidence gating
   2. Calibration (reference marker → inspector input → unverified fallback)
   3. Symbol detection (veg/non-veg dot, GM mark) — parallel with calibration
-  4. Rule-based classifier with confidence scoring
+  4. Rule-based classifier with 5-outcome evaluation and confidence scoring
 """
 import logging
 import os
 from typing import Optional
+from celery import Celery
 
 logger = logging.getLogger(__name__)
 
-# ── Celery setup (optional) ───────────────────────────────────────────────────
-CELERY_AVAILABLE = False
-celery_app = None
+# ── Celery configuration (Mandatory async pipeline) ───────────────────────────
+_broker = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+_backend = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 
-try:
-    from celery import Celery
-    _broker = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
-    _backend = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
-    celery_app = Celery("lm_pipeline", broker=_broker, backend=_backend)
-    celery_app.conf.task_serializer = "json"
-    celery_app.conf.result_serializer = "json"
-    CELERY_AVAILABLE = True
-    logger.info("Celery configured with broker: %s", _broker)
-except ImportError:
-    logger.info("Celery not installed — pipeline will run synchronously.")
+celery_app = Celery("lm_pipeline", broker=_broker, backend=_backend)
+celery_app.conf.task_serializer = "json"
+celery_app.conf.result_serializer = "json"
+celery_app.conf.task_ignore_result = False
 
 
 # ── OCR confidence gate ───────────────────────────────────────────────────────
@@ -69,19 +64,20 @@ def run_calibration_stage(image_bytes: bytes,
     cal = calibrate_from_image(image_bytes)
     if cal["method"] != "unverified":
         return cal
-    # Try inspector-provided
-    if inspector_width_mm and inspector_height_mm and img_width_px and img_height_px:
-        return calibrate_from_inspector_input(
-            inspector_width_mm, inspector_height_mm, img_width_px, img_height_px
-        )
+
+    # Try inspector input
+    if inspector_width_mm and img_width_px:
+        return calibrate_from_inspector_input(inspector_width_mm, img_width_px)
+    if inspector_height_mm and img_height_px:
+        return calibrate_from_inspector_input(inspector_height_mm, img_height_px)
+
     return cal
 
 
-def run_symbol_stage(image_bytes: bytes, ocr_text: str, category: str = "general") -> dict:
-    """Run symbol detection from image + OCR text."""
+def run_symbol_stage(image_bytes: bytes, ocr_text: str = "", category: str = "general") -> dict:
+    """Detect veg/non-veg dot and GM mark."""
     from app.services.symbol_service import detect_symbols, detect_gm_mark_from_text
-    symbols = detect_symbols(image_bytes, category=category)
-    # Supplement with text-based GM mark detection
+    symbols = detect_symbols(image_bytes)
     if not symbols.get("gm_mark"):
         symbols["gm_mark"] = detect_gm_mark_from_text(ocr_text)
     return symbols
@@ -100,82 +96,49 @@ def run_pipeline_sync(image_bytes: bytes,
                        inspector_width_mm: Optional[float] = None,
                        inspector_height_mm: Optional[float] = None,
                        img_width_px: Optional[int] = None,
-                       img_height_px: Optional[int] = None) -> dict:
+                       img_height_px: Optional[int] = None,
+                       db=None,
+                       manufacturer_id=None,
+                       product_id=None) -> dict:
     """
-    Run the full pipeline synchronously.
-    Returns a combined result dict suitable for writing to the Scan model.
-
-    Stages:
-      1. Barcode/QR decode + Open Food Facts lookup (fast, runs first)
-      2. OCR (English + Hindi)
-      3. Calibration + Symbol detection
-      4. Rule-based compliance classifier
-      5. Groq LLM structured extraction (optional, enriches fields)
+    Run the full perception pipeline synchronously.
+    Used by Celery workers to process an enqueued scan image.
     """
-    # ── Stage 1: Barcode detection ────────────────────────────────────────────
-    from app.services.barcode_service import scan_barcodes_full
-    barcode_result = scan_barcodes_full(image_bytes)
-    barcode_product = barcode_result.get("product_info", {})
+    # ── Stage 1: Barcode/QR decode ───────────────────────────────────────────
+    barcode_result = None
+    barcode_product = None
+    try:
+        from app.services.barcode_service import decode_and_lookup
+        barcode_result = decode_and_lookup(image_bytes)
+        if barcode_result.get("decoded"):
+            barcode_product = barcode_result.get("product_info")
+    except Exception as e:
+        logger.warning("Barcode decoding failed: %s", e)
 
-    # ── Stage 2: OCR ──────────────────────────────────────────────────────────
+    # ── Stage 2: OCR ─────────────────────────────────────────────────────────
     ocr = run_ocr_stage(image_bytes)
-    raw_text = ocr["text"]
-    ocr_confidence = ocr["confidence"]
-    ocr_low = ocr["low_confidence"]
-    # If Groq vision was used, structured fields are already available — skip
-    # the separate Groq text extraction step to avoid a redundant API call.
-    groq_vision_fields = ocr.get("groq_fields", {})
+    raw_text = ocr.get("text", "")
+    ocr_confidence = ocr.get("confidence", 0.0)
+    ocr_low = ocr.get("low_confidence", False)
+    groq_used = ocr.get("source") == "groq_vision"
+    extracted_fields = ocr.get("extracted_fields") or {}
+    field_confidences = ocr.get("field_confidences") or {}
 
-    # ── Stages 3a & 3b: Calibration + Symbol detection ────────────────────────
+    # ── Stages 3 & 4: Calibration + Symbol detection ─────────────────────────
     calibration = run_calibration_stage(
-        image_bytes, inspector_width_mm, inspector_height_mm,
-        img_width_px, img_height_px,
+        image_bytes,
+        inspector_width_mm=inspector_width_mm,
+        inspector_height_mm=inspector_height_mm,
+        img_width_px=img_width_px,
+        img_height_px=img_height_px,
     )
     symbols = run_symbol_stage(image_bytes, raw_text, category)
 
-    # ── Stage 4: Groq LLM structured extraction ───────────────────────────────
-    # If Groq vision already ran during OCR stage, reuse those fields directly.
-    # Otherwise send the Tesseract text to the Groq text model.
-    from app.services.groq_service import extract_structured
-    field_confidences = dict(ocr.get("field_confidences") or {})
-    if groq_vision_fields:
-        groq_fields = groq_vision_fields
-        logger.info("Using Groq vision fields — skipping text extraction pass.")
-    else:
-        structured = extract_structured(raw_text)
-        if structured.get("fields") is not None:
-            groq_fields = structured.get("fields") or {}
-            field_confidences.update(structured.get("field_confidences") or {})
-        else:
-            groq_fields = structured
-    groq_used = bool(groq_fields)
-
-    extracted_fields = dict(groq_fields)
-    manufacturer_parts = [
-        extracted_fields.get("manufacturer_name"),
-        extracted_fields.get("manufacturer_address"),
-    ]
-    manufacturer_info = ", ".join(part for part in manufacturer_parts if part)
-    if manufacturer_info and not extracted_fields.get("manufacturer_info"):
-        extracted_fields["manufacturer_info"] = manufacturer_info
-        part_confidences = [
-            field_confidences.get("manufacturer_name"),
-            field_confidences.get("manufacturer_address"),
-        ]
-        usable_confidences = [float(c) for c in part_confidences if isinstance(c, (int, float))]
-        if usable_confidences:
-            field_confidences["manufacturer_info"] = sum(usable_confidences) / len(usable_confidences)
-
-    if groq_used:
-        logger.info("Using structured extraction fields: %s", list(extracted_fields.keys()))
-
-    # ── Barcode info as highest-priority fallback for key fields ──────────────
-    # Open Food Facts data is authoritative — overwrite only if present
+    # Merge barcode metadata into extracted fields if OCR missed them
     if barcode_product:
         for src_key, dst_key in [
             ("product_name",      "product_name"),
-            ("brand_name",        "brand_name"),
-            ("manufacturer_name", "manufacturer_info"),
+            ("brands",            "brand_name"),
             ("net_quantity",      "net_quantity"),
             ("fssai_number",      "fssai_number"),
             ("country_of_origin", "country_of_origin"),
@@ -195,6 +158,9 @@ def run_pipeline_sync(image_bytes: bytes,
         "field_confidences": field_confidences,
         "overall_confidence": ocr_confidence,
         "low_confidence": ocr_low,
+        "db": db,
+        "manufacturer_id": manufacturer_id,
+        "product_id": product_id,
     })
 
     # ── Bounding boxes ────────────────────────────────────────────────────────
@@ -219,24 +185,15 @@ def run_pipeline_sync(image_bytes: bytes,
         "field_results": compliance["field_results"],
         "missing_fields": compliance["missing_fields"],
         "extracted_fields": compliance["extracted_fields"],
-        "compliance_checks": compliance["compliance_checks"],
-        "compliance_summary": compliance["compliance_summary"],
+        "compliance_checks": compliance.get("compliance_checks", []),
+        "compliance_summary": compliance.get("compliance_summary", {}),
         "remarks": compliance["remarks"],
-        "total_fields_checked": compliance["total_fields_checked"],
-        "mandatory_fields_present": compliance["mandatory_fields_present"],
-        "total_mandatory_fields": compliance["total_mandatory_fields"],
         "pipeline_status": pipeline_status,
-        "low_confidence_ocr": ocr_low,
     }
 
 
 def _build_bounding_boxes(extracted_fields: dict, ocr_confidence: float) -> list:
-    """
-    Build synthetic bounding box annotations from extracted field values.
-    Without actual word-level Tesseract position data this produces placeholder
-    annotations that the review UI can display and let officers confirm/correct.
-    When Tesseract image_to_data is available, real positions are used.
-    """
+    """Build bounding box annotations from extracted field values."""
     boxes = []
     for field_key, value in extracted_fields.items():
         if value:
@@ -245,47 +202,125 @@ def _build_bounding_boxes(extracted_fields: dict, ocr_confidence: float) -> list
                 "text": value,
                 "confidence": round(ocr_confidence / 100, 2),
                 "confirmed": ocr_confidence >= OCR_CONFIDENCE_THRESHOLD,
-                "bbox": None,  # [x, y, w, h] — populated by real Tesseract word coords when available
+                "bbox": None,
             })
     return boxes
 
 
-# ── Celery tasks (only registered if Celery is available) ─────────────────────
+# ── Celery task ───────────────────────────────────────────────────────────────
 
-if CELERY_AVAILABLE and celery_app:
-    @celery_app.task(bind=True, name="pipeline.run", max_retries=2)
-    def run_pipeline_task(self, scan_id: str, image_path: str, category: str):
-        """
-        Celery task: run pipeline on a saved image, update scan record in DB.
-        """
-        from app.database import SessionLocal
-        from app.models.scan import Scan
+@celery_app.task(bind=True, name="pipeline.run", max_retries=2)
+def run_pipeline_task(self, scan_id: str, image_path: str, category: str):
+    """
+    Celery task: run perception pipeline on a saved image, update scan record in DB.
+    """
+    from app.database import SessionLocal
+    from app.models.scan import Scan
+    from app.models.rules import ComplianceCheck, ComplianceCheckResult as ComplianceCheckResultEnum
+    from app.models.commodity_category import CommodityCategory
+    from app.models.product import Product
 
-        db = SessionLocal()
-        try:
-            scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
-            if not scan:
-                return {"error": "Scan not found"}
+    db = SessionLocal()
+    scan = None
+    try:
+        scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if not scan:
+            return {"error": "Scan not found"}
 
-            scan.pipeline_status = "processing"
+        scan.pipeline_status = "processing"
+        db.commit()
+
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+
+        result = run_pipeline_sync(
+            image_bytes,
+            category=category,
+            db=db,
+            manufacturer_id=None,
+            product_id=scan.product_id,
+        )
+
+        for key, val in result.items():
+            if hasattr(scan, key) and key != "compliance_checks":
+                setattr(scan, key, val)
+
+        # Extract product_name if missing
+        extracted = result.get("extracted_fields") or {}
+        product_name = scan.product_name or extracted.get("product_name")
+        if not product_name:
+            raw_text = result.get("raw_ocr_text", "")
+            ocr_conf = result.get("ocr_confidence", 0) or 0
+            if raw_text and ocr_conf >= 50:
+                lines = [l.strip() for l in raw_text.splitlines() if len(l.strip()) > 3 and l.strip().replace(" ", "").isascii()]
+                product_name = lines[0][:60] if lines else None
+        if product_name:
+            scan.product_name = product_name
+
+        # Persist ComplianceCheck rows
+        checks_data = result.get("compliance_checks", [])
+        if checks_data:
+            db.query(ComplianceCheck).filter(ComplianceCheck.scan_id == scan.scan_id).delete()
+            for check in checks_data:
+                res_val = check.get("result") if isinstance(check, dict) else getattr(check, "result", None)
+                if isinstance(res_val, ComplianceCheckResultEnum):
+                    res_enum = res_val
+                else:
+                    try:
+                        res_enum = ComplianceCheckResultEnum(str(res_val))
+                    except ValueError:
+                        res_enum = ComplianceCheckResultEnum.ManualReviewRequired
+
+                db.add(
+                    ComplianceCheck(
+                        scan_id=scan.scan_id,
+                        rule_id=check.get("rule_id") if isinstance(check, dict) else getattr(check, "rule_id", None),
+                        field_key=check.get("field_key") if isinstance(check, dict) else getattr(check, "field_key", ""),
+                        result=res_enum,
+                        confidence=check.get("confidence") if isinstance(check, dict) else getattr(check, "confidence", None),
+                        extracted_value=check.get("extracted_value") if isinstance(check, dict) else getattr(check, "extracted_value", None),
+                        relaxation_order_id=check.get("relaxation_order_id") if isinstance(check, dict) else getattr(check, "relaxation_order_id", None),
+                        notes=check.get("notes") if isinstance(check, dict) else getattr(check, "notes", None),
+                    )
+                )
+
+        # Auto-upsert Product
+        if scan.product_name:
+            cat_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike((scan.category or "general").strip())).first()
+            cat_id = cat_obj.id if cat_obj else None
+            prod = db.query(Product).filter(
+                Product.name.ilike(scan.product_name),
+                (Product.commodity_category_id == cat_id) | (Product.category == (scan.category or "general")),
+                Product.is_active == True,
+            ).first()
+            if not prod:
+                prod = Product(
+                    name=scan.product_name,
+                    category=scan.category or "general",
+                    commodity_category_id=cat_id,
+                    brand_name=scan.brand_name,
+                    is_compliant=scan.is_compliant,
+                    last_compliance_score=scan.compliance_score,
+                    last_scan_id=scan.scan_id,
+                )
+                db.add(prod)
+                db.flush()
+            else:
+                prod.last_compliance_score = scan.compliance_score
+                prod.last_scan_id = scan.scan_id
+                prod.is_compliant = scan.is_compliant
+                if cat_id and not prod.commodity_category_id:
+                    prod.commodity_category_id = cat_id
+            scan.product_id = prod.id
+
+        db.commit()
+        return {"scan_id": scan_id, "status": scan.pipeline_status}
+
+    except Exception as exc:
+        logger.exception("Error processing scan %s in Celery worker: %s", scan_id, exc)
+        if scan:
+            scan.pipeline_status = "failed"
             db.commit()
-
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
-
-            result = run_pipeline_sync(image_bytes, category=category)
-
-            for key, val in result.items():
-                if hasattr(scan, key):
-                    setattr(scan, key, val)
-
-            db.commit()
-            return {"scan_id": scan_id, "status": scan.pipeline_status}
-
-        except Exception as exc:
-            if scan:
-                scan.pipeline_status = "failed"
-                db.commit()
-            raise self.retry(exc=exc, countdown=5)
-        finally:
-            db.close()
+        raise self.retry(exc=exc, countdown=5)
+    finally:
+        db.close()

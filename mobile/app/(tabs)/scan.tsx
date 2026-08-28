@@ -120,12 +120,8 @@ export default function ScanScreen() {
         headers: { "Content-Type": "multipart/form-data" },
       });
 
-      await Haptics.notificationAsync(
-        res.data.is_compliant
-          ? Haptics.NotificationFeedbackType.Success
-          : Haptics.NotificationFeedbackType.Warning
-      );
-      router.push({ pathname: "/result", params: { data: JSON.stringify(res.data) } });
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      router.push({ pathname: "/result", params: { scan_id: res.data.scan_id, data: JSON.stringify(res.data) } });
     } catch (err: any) {
       Alert.alert("Error", err?.response?.data?.detail || err?.message || "Scan failed. Try again.");
     } finally {
