@@ -89,6 +89,9 @@ class Scan(Base):
     @property
     def compliance_summary(self) -> dict:
         from app.services.compliance_engine import summarize_checks
+        if self.review_status == "reviewed" and self.is_compliant is not None:
+            return {"headline": "AllPass" if self.is_compliant else "HasFailures",
+                    "counts": {}, "total": len(self.compliance_checks or [])}
         checks = self.compliance_checks or []
         if checks:
             return summarize_checks(checks)

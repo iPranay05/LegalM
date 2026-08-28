@@ -11,6 +11,7 @@ RUN apt-get update \
         libgl1 \
         libglib2.0-0 \
         tesseract-ocr \
+        libzbar0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

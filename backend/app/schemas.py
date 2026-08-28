@@ -84,6 +84,7 @@ class ScanOut(BaseModel):
     district: Optional[str]
     raw_ocr_text: Optional[str]
     image_path: Optional[str]
+    barcode_data: Optional[Dict[str, Any]] = None
     is_compliant: Optional[bool]
     compliance_score: Optional[float]
     field_results: Optional[Dict[str, bool]]

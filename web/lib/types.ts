@@ -148,6 +148,8 @@ export interface FieldTabEntry {
   present: boolean;
   extracted_value?: string;
   legal_reference?: string;
+  result?: ComplianceCheckResult;
+  notes?: string;
 }
 
 // ── Products & Manufacturers ──────────────────────────────────────────────────

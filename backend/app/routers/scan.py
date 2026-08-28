@@ -153,6 +153,7 @@ class ScanOut(BaseModel):
     pipeline_status: Optional[str]
     calibration_method: Optional[str]
     symbols_detected: Optional[dict]
+    barcode_data: Optional[dict]
     is_compliant: Optional[bool]
     compliance_score: Optional[float]
     field_results: Optional[dict]
@@ -408,10 +409,13 @@ def get_scan_result_tabs(
     all_rules = []
     violations = []
     not_applicable_relaxed = []
+    check_by_field = {c.field_key: c for c in (scan.compliance_checks or [])}
 
     for field_def in COMPLIANCE_FIELDS:
         key = field_def["key"]
         present = field_results.get(key, False)
+        check = check_by_field.get(key)
+        result = check.result.value if check and hasattr(check.result, "value") else (str(check.result) if check else None)
         entry = {
             "key": key,
             "label": field_def["label"],
@@ -420,8 +424,12 @@ def get_scan_result_tabs(
             "present": present,
             "extracted_value": extracted.get(key),
             "legal_reference": field_def.get("description"),
+            "result": result,
+            "notes": check.notes if check else None,
         }
         all_rules.append(entry)
+        if result == "ManualReviewRequired":
+            continue
         if not present:
             if field_def["required"]:
                 violations.append(entry)
@@ -481,6 +489,7 @@ def confirm_bounding_box(
 @router.patch("/{scan_id}/review-complete")
 def mark_review_complete(
     scan_id: str,
+    decision: bool,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -499,9 +508,18 @@ def mark_review_complete(
             detail=f"{len(unconfirmed)} unconfirmed bounding box(es). Confirm all before submitting.",
         )
 
+    scan.is_compliant = decision
+    scan.pipeline_status = "complete"
     scan.review_status = "reviewed"
     scan.reviewed_by_id = current_user.id
     scan.reviewed_at = datetime.utcnow()
+    if scan.product_id:
+        from app.models.product import Product
+        product = db.query(Product).filter(Product.id == scan.product_id).first()
+        if product:
+            product.is_compliant = decision
+            product.last_compliance_score = scan.compliance_score
+            product.last_scan_id = scan.scan_id
     db.commit()
     return {"detail": "Review complete", "scan_id": scan_id}
 

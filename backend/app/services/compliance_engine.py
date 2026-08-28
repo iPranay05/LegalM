@@ -174,6 +174,15 @@ COMPLIANCE_FIELDS = [
         ],
         "description": "FSSAI licence number (mandatory for food products)",
     },
+    {
+        "key": "font_size",
+        "rule_family": "font_size",
+        "label": "Minimum Declaration Font Size",
+        "weight": 0,
+        "required": True,
+        "patterns": [],
+        "description": "Rule 8 - Minimum font size verification requires calibrated physical measurement",
+    },
 ]
 
 COMPLIANCE_FIELD_MAP = {f["key"]: f for f in COMPLIANCE_FIELDS}

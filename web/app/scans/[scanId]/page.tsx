@@ -236,9 +236,9 @@ export default function ScanDetailPage() {
     loadAll();
   }
 
-  async function markReviewComplete() {
+  async function markReviewComplete(decision: boolean) {
     try {
-      await api.patch(`/scan/${scanId}/review-complete`);
+      await api.patch(`/scan/${scanId}/review-complete`, undefined, { params: { decision } });
       loadAll();
     } catch (err: any) {
       alert(err?.response?.data?.detail || "Cannot complete review yet.");
@@ -347,11 +347,10 @@ export default function ScanDetailPage() {
                 : "All items confirmed. You can mark this review as complete."}
             </p>
           </div>
-          {unconfirmedBoxes.length === 0 && (
-            <button onClick={markReviewComplete} className="gov-btn text-xs px-3 py-1.5 whitespace-nowrap">
-              Mark Complete
-            </button>
-          )}
+          {unconfirmedBoxes.length === 0 && <div className="flex gap-2">
+            <button onClick={() => markReviewComplete(true)} className="gov-btn text-xs px-3 py-1.5 whitespace-nowrap">Compliant</button>
+            <button onClick={() => markReviewComplete(false)} className="text-xs px-3 py-1.5 whitespace-nowrap rounded-lg border border-red-300 text-red-700 hover:bg-red-50">Non-Compliant</button>
+          </div>}
         </div>
       )}
 
@@ -496,7 +495,9 @@ export default function ScanDetailPage() {
                       </td>
                       <td className="table-td text-xs font-mono text-gray-500">{row.extracted_value || "—"}</td>
                       <td className="table-td">
-                        {row.present
+                        {row.result === "ManualReviewRequired"
+                          ? <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-100 px-2 py-1 text-[10px] font-semibold text-amber-800">⚠ Manual Review</span>
+                          : row.present
                           ? <span className="badge-pass text-[10px]">✓ Found</span>
                           : <span className="badge-fail text-[10px]">✗ Missing</span>}
                       </td>

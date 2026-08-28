@@ -109,8 +109,8 @@ def run_pipeline_sync(image_bytes: bytes,
     barcode_result = None
     barcode_product = None
     try:
-        from app.services.barcode_service import decode_and_lookup
-        barcode_result = decode_and_lookup(image_bytes)
+        from app.services.barcode_service import scan_barcodes_full
+        barcode_result = scan_barcodes_full(image_bytes)
         if barcode_result.get("decoded"):
             barcode_product = barcode_result.get("product_info")
     except Exception as e:
