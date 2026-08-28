@@ -140,7 +140,7 @@ export default function ProductsPage() {
                     {p.barcode ? <span className="block">Bar: {p.barcode}</span> : null}
                     {!p.sku && !p.barcode ? "—" : null}
                   </td>
-                  <td className="table-td"><ComplianceBadge isCompliant={p.is_compliant} /></td>
+                  <td className="table-td"><ComplianceBadge isCompliant={p.is_compliant} headline={p.compliance_headline} /></td>
                   <td className="table-td w-32">
                     {p.last_compliance_score != null
                       ? <ScoreBar score={p.last_compliance_score} />

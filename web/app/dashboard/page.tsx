@@ -231,7 +231,7 @@ export default function DashboardPage() {
                     {[scan.shop_name, scan.location].filter(Boolean).join(" · ") || "—"}
                   </td>
                   <td className="table-td w-36"><ScoreBar score={scan.compliance_score ?? 0} /></td>
-                  <td className="table-td"><ComplianceBadge isCompliant={scan.is_compliant} headline={scan.compliance_summary?.headline} /></td>
+                  <td className="table-td"><ComplianceBadge isCompliant={scan.is_compliant} score={scan.compliance_score} pipelineStatus={scan.pipeline_status} headline={scan.compliance_summary?.headline} /></td>
                   <td className="table-td">
                     {scan.pipeline_status === "review_needed" ? (
                       <span className="text-xs font-bold text-amber-600">⚠ Review</span>

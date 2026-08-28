@@ -124,7 +124,9 @@ def _build_report_html(scan, findings: list) -> str:
             </tr>"""
             
             bbox = getattr(check, "bounding_box", None)
-            if bbox:
+            # Vision-estimated boxes are not ground-truth localization. Do not
+            # publish a misleading crop; only OCR-confirmed boxes are cropped.
+            if bbox and bbox.get("bbox_source") != "vision_estimate":
                 img_path = _get_image_path_for_check(scan, getattr(check, "image_index", 0))
                 crop_bytes = _crop_bounding_box(img_path, bbox)
                 if crop_bytes:
@@ -163,8 +165,10 @@ def _build_report_html(scan, findings: list) -> str:
           <td style="padding:6px 10px;border-bottom:1px solid #eee;">{f.get('description','')}</td>
         </tr>"""
 
-    compliance_color = "#1a7a3c" if scan.is_compliant else "#c0392b"
-    compliance_label = "COMPLIANT" if scan.is_compliant else "NON-COMPLIANT"
+    summary = scan.compliance_summary or {}
+    headline = summary.get("headline") if isinstance(summary, dict) else None
+    compliance_color = "#e67e22" if headline == "NeedsManualReview" else ("#1a7a3c" if headline == "AllPass" else "#c0392b")
+    compliance_label = "NEEDS REVIEW" if headline == "NeedsManualReview" else ("COMPLIANT" if headline == "AllPass" else "NON-COMPLIANT")
 
     return f"""<!DOCTYPE html>
 <html>
@@ -267,9 +271,12 @@ def _build_report_docx(scan, findings: list) -> bytes:
     p.add_run("Scan ID: ").bold = True
     p.add_run(scan.scan_id)
     p.add_run("    Status: ").bold = True
-    run = p.add_run("COMPLIANT" if scan.is_compliant else "NON-COMPLIANT")
+    summary = scan.compliance_summary or {}
+    headline = summary.get("headline") if isinstance(summary, dict) else None
+    report_label = "NEEDS REVIEW" if headline == "NeedsManualReview" else ("COMPLIANT" if headline == "AllPass" else "NON-COMPLIANT")
+    run = p.add_run(report_label)
     run.bold = True
-    run.font.color.rgb = RGBColor(0x1a, 0x7a, 0x3c) if scan.is_compliant else RGBColor(0xc0, 0x39, 0x2b)
+    run.font.color.rgb = RGBColor(0xe6, 0x7e, 0x22) if headline == "NeedsManualReview" else (RGBColor(0x1a, 0x7a, 0x3c) if headline == "AllPass" else RGBColor(0xc0, 0x39, 0x2b))
     p.add_run(f"  ({scan.compliance_score:.1f}%)")
 
     # Details table
@@ -320,7 +327,7 @@ def _build_report_docx(scan, findings: list) -> bytes:
             r[3].text = res_val
 
             bbox = getattr(check, "bounding_box", None)
-            if bbox:
+            if bbox and bbox.get("bbox_source") != "vision_estimate":
                 img_path = _get_image_path_for_check(scan, getattr(check, "image_index", 0))
                 crop_bytes = _crop_bounding_box(img_path, bbox)
                 if crop_bytes:

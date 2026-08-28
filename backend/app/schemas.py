@@ -91,6 +91,8 @@ class ScanOut(BaseModel):
     extracted_fields: Optional[Dict[str, Any]]
     compliance_checks: Optional[List[ComplianceCheckOut]] = None
     compliance_summary: Optional[ComplianceSummaryOut] = None
+    pipeline_status: Optional[str] = None
+    review_status: Optional[str] = None
     remarks: Optional[str]
     created_at: datetime
     inspector_id: Optional[int]

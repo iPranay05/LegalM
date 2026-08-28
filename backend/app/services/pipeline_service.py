@@ -99,7 +99,8 @@ def run_pipeline_sync(image_bytes: bytes,
                        img_height_px: Optional[int] = None,
                        db=None,
                        manufacturer_id=None,
-                       product_id=None) -> dict:
+                       product_id=None,
+                       image_index: int = 0) -> dict:
     """
     Run the full perception pipeline synchronously.
     Used by Celery workers to process an enqueued scan image.
@@ -124,6 +125,19 @@ def run_pipeline_sync(image_bytes: bytes,
     extracted_fields = ocr.get("extracted_fields") or ocr.get("groq_fields") or {}
     field_confidences = ocr.get("field_confidences") or {}
     field_bboxes = ocr.get("field_bboxes") or {}
+
+    # The rule catalog evaluates one declaration, while vision returns the
+    # name and address as two precise fields. Preserve both and also expose the
+    # combined rule field so manufacturer declarations can pass correctly.
+    manufacturer_parts = [extracted_fields.get("manufacturer_name"),
+                          extracted_fields.get("manufacturer_address")]
+    if not extracted_fields.get("manufacturer_info") and any(manufacturer_parts):
+        extracted_fields["manufacturer_info"] = ", ".join(str(p) for p in manufacturer_parts if p)
+        field_confidences["manufacturer_info"] = min(
+            [field_confidences.get(k, 0.0) for k in ("manufacturer_name", "manufacturer_address") if extracted_fields.get(k)]
+            or [0.0]
+        )
+        field_bboxes["manufacturer_info"] = field_bboxes.get("manufacturer_name") or field_bboxes.get("manufacturer_address")
 
     # ── Stages 3 & 4: Calibration + Symbol detection ─────────────────────────
     calibration = run_calibration_stage(
@@ -158,7 +172,7 @@ def run_pipeline_sync(image_bytes: bytes,
         "extracted_fields": extracted_fields,
         "field_confidences": field_confidences,
         "field_bboxes": field_bboxes,
-        "image_index": 0,
+        "image_index": image_index,
         "overall_confidence": ocr_confidence,
         "low_confidence": ocr_low,
         "db": db,
@@ -168,7 +182,8 @@ def run_pipeline_sync(image_bytes: bytes,
 
     # ── Bounding boxes ────────────────────────────────────────────────────────
     bounding_boxes = _build_bounding_boxes(
-        compliance["extracted_fields"], ocr_confidence, field_confidences, field_bboxes
+        compliance["extracted_fields"], ocr_confidence, field_confidences, field_bboxes,
+        image_index=image_index,
     )
 
     # ── Pipeline status ───────────────────────────────────────────────────────
@@ -198,7 +213,8 @@ def run_pipeline_sync(image_bytes: bytes,
 
 
 def _build_bounding_boxes(extracted_fields: dict, ocr_confidence: float,
-                          field_confidences: dict = None, field_bboxes: dict = None) -> list:
+                          field_confidences: dict = None, field_bboxes: dict = None,
+                          image_index: int = 0) -> list:
     """Build bounding box annotations from extracted field values with real localization."""
     field_confidences = field_confidences or {}
     field_bboxes = field_bboxes or {}
@@ -211,6 +227,7 @@ def _build_bounding_boxes(extracted_fields: dict, ocr_confidence: float,
             bbox = field_bboxes.get(field_key)
             boxes.append({
                 "field": field_key,
+                "image_index": image_index,
                 "text": value,
                 "confidence": round(conf, 2),
                 "confirmed": conf >= (OCR_CONFIDENCE_THRESHOLD / 100 if conf <= 1.0 else OCR_CONFIDENCE_THRESHOLD),
@@ -220,10 +237,103 @@ def _build_bounding_boxes(extracted_fields: dict, ocr_confidence: float,
     return boxes
 
 
+def _merge_pipeline_results(results: list[dict], category: str, db=None,
+                            product_id=None) -> dict:
+    """Combine independent photo observations into one compliance decision."""
+    if len(results) == 1:
+        return results[0]
+
+    merged_fields = {}
+    merged_confidences = {}
+    merged_bboxes = {}
+    merged_sources = {}
+    for result in results:
+        for field, value in (result.get("extracted_fields") or {}).items():
+            if not value:
+                continue
+            confidence = 0.0
+            for box in result.get("bounding_boxes") or []:
+                if box.get("field") == field:
+                    confidence = float(box.get("confidence") or 0)
+                    if box.get("bbox") is not None:
+                        merged_bboxes[field] = box.get("bbox")
+                    break
+            if field not in merged_fields or confidence > merged_confidences.get(field, -1):
+                merged_fields[field] = value
+                merged_confidences[field] = confidence
+                merged_sources[field] = box.get("image_index", 0) if box else 0
+
+    manufacturer_parts = [merged_fields.get("manufacturer_name"), merged_fields.get("manufacturer_address")]
+    if not merged_fields.get("manufacturer_info") and any(manufacturer_parts):
+        merged_fields["manufacturer_info"] = ", ".join(str(p) for p in manufacturer_parts if p)
+        merged_confidences["manufacturer_info"] = min(
+            [merged_confidences.get(k, 0.0) for k in ("manufacturer_name", "manufacturer_address") if merged_fields.get(k)]
+            or [0.0]
+        )
+
+    raw_text = "\n\n".join(
+        f"[Image {i + 1}]\n{r.get('raw_ocr_text', '')}" for i, r in enumerate(results)
+        if r.get("raw_ocr_text")
+    )
+    symbols = {key: any(bool(r.get("symbols_detected", {}).get(key)) for r in results)
+               for key in {k for r in results for k in (r.get("symbols_detected") or {})}}
+    calibration = next((r.get("calibration_data") for r in results
+                        if r.get("calibration_data", {}).get("verified")),
+                       results[0].get("calibration_data") or {})
+    confidence = max(float(r.get("ocr_confidence") or 0) for r in results)
+    compliance = run_classifier_stage({
+        "ocr_text": raw_text,
+        "category": category,
+        "symbols": symbols,
+        "calibration": calibration,
+        "extracted_fields": merged_fields,
+        "field_confidences": merged_confidences,
+        "field_bboxes": merged_bboxes,
+        "image_index": 0,
+        "overall_confidence": confidence,
+        # Do not propagate a missing/ambiguous field from one photo to every
+        # field found confidently on another photo. The classifier already
+        # applies confidence gating per declaration.
+        "low_confidence": confidence < 60.0,
+        "db": db,
+        "product_id": product_id,
+    })
+    # The final classifier runs on the merged context, but evidence must still
+    # point to the photo where each winning value was actually observed.
+    for check in compliance.get("compliance_checks", []):
+        field = check.get("field_key") if isinstance(check, dict) else getattr(check, "field_key", None)
+        if field in merged_sources:
+            if isinstance(check, dict):
+                check["image_index"] = merged_sources[field]
+                check["bounding_box"] = merged_bboxes.get(field)
+            else:
+                check.image_index = merged_sources[field]
+                check.bounding_box = merged_bboxes.get(field)
+    all_boxes = [box for r in results for box in (r.get("bounding_boxes") or [])]
+    return {
+        **results[0],
+        "raw_ocr_text": raw_text,
+        "ocr_confidence": confidence,
+        "groq_used": any(r.get("groq_used") for r in results),
+        "symbols_detected": symbols,
+        "calibration_data": calibration,
+        "bounding_boxes": all_boxes,
+        "is_compliant": compliance["is_compliant"],
+        "compliance_score": compliance["compliance_score"],
+        "field_results": compliance["field_results"],
+        "missing_fields": compliance["missing_fields"],
+        "extracted_fields": compliance["extracted_fields"],
+        "compliance_checks": compliance.get("compliance_checks", []),
+        "compliance_summary": compliance.get("compliance_summary", {}),
+        "remarks": compliance["remarks"],
+        "pipeline_status": "review_needed" if compliance["compliance_summary"]["headline"] == "NeedsManualReview" else "complete",
+    }
+
+
 # ── Celery task ───────────────────────────────────────────────────────────────
 
 @celery_app.task(bind=True, name="pipeline.run", max_retries=2)
-def run_pipeline_task(self, scan_id: str, image_path: str, category: str):
+def run_pipeline_task(self, scan_id: str, image_path: str | list[str], category: str):
     """
     Celery task: run perception pipeline on a saved image, update scan record in DB.
     """
@@ -243,19 +353,22 @@ def run_pipeline_task(self, scan_id: str, image_path: str, category: str):
         scan.pipeline_status = "processing"
         db.commit()
 
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
+        image_paths = image_path if isinstance(image_path, list) else [image_path]
+        results = []
+        for image_index, current_path in enumerate(image_paths):
+            with open(current_path, "rb") as f:
+                results.append(run_pipeline_sync(
+                    f.read(), category=category, db=db, manufacturer_id=None,
+                    product_id=scan.product_id, image_index=image_index,
+                ))
 
-        result = run_pipeline_sync(
-            image_bytes,
-            category=category,
-            db=db,
-            manufacturer_id=None,
-            product_id=scan.product_id,
-        )
+        # Each photo is a separate OCR observation. Merge fields and evidence
+        # across all observations, preferring the strongest non-empty value.
+        result = _merge_pipeline_results(results, category=category, db=db,
+                                         product_id=scan.product_id)
 
         for key, val in result.items():
-            if hasattr(scan, key) and key != "compliance_checks":
+            if hasattr(scan, key) and key not in ("compliance_checks", "compliance_summary"):
                 setattr(scan, key, val)
 
         # Extract product_name if missing

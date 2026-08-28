@@ -5,6 +5,7 @@ from app.database import get_db
 from app.models.product import Product
 from app.models.manufacturer import Manufacturer
 from app.models.user import User, UserRole
+from app.models.scan import Scan
 from app.routers.deps import get_current_user, require_role
 from pydantic import BaseModel
 from datetime import datetime
@@ -67,6 +68,7 @@ class ProductOut(BaseModel):
     manufacturer_id: Optional[int]
     manufacturer: Optional[ManufacturerOut]
     is_compliant: Optional[bool]
+    compliance_headline: Optional[str] = None
     last_compliance_score: Optional[float]
     last_scan_id: Optional[str]
     registered_by_manufacturer: bool
@@ -174,7 +176,16 @@ def list_products(
     if is_compliant is not None:
         q = q.filter(Product.is_compliant == is_compliant)
 
-    return q.order_by(Product.name).offset(skip).limit(limit).all()
+    products = q.order_by(Product.name).offset(skip).limit(limit).all()
+    # Product status is a projection of its latest scan. Include the headline
+    # so a manual-review scan is not incorrectly rendered as Non-Compliant.
+    output = []
+    for product in products:
+        latest = db.query(Scan).filter(Scan.scan_id == product.last_scan_id).first() if product.last_scan_id else None
+        item = ProductOut.model_validate(product).model_dump()
+        item["compliance_headline"] = latest.compliance_summary.get("headline") if latest else None
+        output.append(item)
+    return output
 
 
 @router.post("/", response_model=ProductOut, status_code=201)

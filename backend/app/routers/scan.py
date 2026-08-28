@@ -321,7 +321,10 @@ async def upload_multi_and_scan(
     # Enqueue Celery task asynchronously
     from app.services.pipeline_service import run_pipeline_task
     try:
-        run_pipeline_task.delay(scan.scan_id, saved_paths[0], scan.category or "general")
+        # Pass the complete image set to the worker.  The primary image remains
+        # image_path for backwards-compatible clients, while the worker uses
+        # image_paths to combine front/back/side-label evidence.
+        run_pipeline_task.delay(scan.scan_id, saved_paths, scan.category or "general")
     except Exception as e:
         scan.pipeline_status = "failed"
         db.commit()

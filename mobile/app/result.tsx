@@ -44,7 +44,7 @@ export default function ResultScreen() {
   useEffect(() => {
     if (!effectiveScanId) return;
 
-    let intervalId: NodeJS.Timeout | null = null;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
 
     async function checkStatusAndFetch() {
       try {
@@ -351,7 +351,7 @@ export default function ResultScreen() {
             <View style={{ gap: 8, marginTop: 8 }}>
               {result.bounding_boxes.map((b) => {
                 const conf = b.confidence != null ? (b.confidence > 1 ? b.confidence / 100 : b.confidence) : 0;
-                const isVision = b.bbox_source === "vision_estimate" || (b.bbox && typeof b.bbox === "object" && (b.bbox as any).bbox_source === "vision_estimate");
+                const isVision = (b as any).bbox_source === "vision_estimate" || (b.bbox && typeof b.bbox === "object" && (b.bbox as any).bbox_source === "vision_estimate");
                 const color = conf >= 0.7 ? Colors.success : (conf >= 0.4 ? Colors.warning : Colors.danger);
                 const sourceBadge = isVision ? "Vision Estimate" : "OCR Word Match";
 
@@ -441,7 +441,7 @@ export default function ResultScreen() {
                     <View style={styles.violationDot} />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.violationLabel}>{row.label}</Text>
-                      {row.legal_reference && <Text style={styles.violationRef}>{row.legal_reference}</Text>}
+                      {(row as any).legal_reference && <Text style={styles.violationRef}>{(row as any).legal_reference}</Text>}
                     </View>
                     <Text style={styles.violationWeight}>–{row.weight}pts</Text>
                   </View>

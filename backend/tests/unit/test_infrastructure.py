@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 from app.config import Settings
 from main import app
+from app.models.scan import Scan
 
 
 def test_production_environment_requires_explicit_database_url():
@@ -50,3 +51,15 @@ def test_unhandled_exception_does_not_leak_internals_when_debug_false():
     assert "/var/app/secret.py" not in data["detail"]
     assert "SELECT" not in data["detail"]
     assert data["detail"] == "Internal server error. Please contact the administrator."
+
+
+def test_empty_check_set_never_reports_all_pass():
+    scan = Scan(
+        scan_id="legacy-failed-scan",
+        is_compliant=False,
+        compliance_score=44.4,
+        missing_fields=["MRP"],
+        field_results={"mrp": False},
+        pipeline_status="failed",
+    )
+    assert scan.compliance_summary["headline"] == "HasFailures"

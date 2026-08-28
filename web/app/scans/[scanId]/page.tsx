@@ -39,6 +39,8 @@ export default function ScanDetailPage() {
   });
   const [submittingFinding, setSubmittingFinding] = useState(false);
   const [confirmingBbox, setConfirmingBbox] = useState<string | null>(null);
+  const [imageIndex, setImageIndex] = useState(0);
+  const touchStartX = useRef<number | null>(null);
 
   useEffect(() => {
     if (!localStorage.getItem("auth_token")) { router.push("/login"); return; }
@@ -102,6 +104,10 @@ export default function ScanDetailPage() {
     }
   }
 
+  const manualReviewChecks = (scan?.compliance_checks || []).filter(
+    (check) => check.result === "ManualReviewRequired"
+  );
+
   // Draw bounding-box overlays on canvas once image loads
   function drawBboxOverlays() {
     const canvas = canvasRef.current;
@@ -113,7 +119,7 @@ export default function ScanDetailPage() {
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const boxes = scan?.bounding_boxes || [];
+    const boxes = (scan?.bounding_boxes || []).filter((box) => (box.image_index ?? 0) === imageIndex);
     boxes.forEach((box) => {
       let x = 0, y = 0, w = 0, h = 0;
       // Backend accepts both legacy arrays and normalized object boxes.
@@ -302,8 +308,11 @@ export default function ScanDetailPage() {
   }
 
   const imageUrl = scan.image_path
-    ? `${API_BASE_URL}/uploads/${scan.image_path.split(/[\\/]/).pop()}`
+    ? `${API_BASE_URL}/uploads/${(scan.image_paths?.[imageIndex] || scan.image_path).split(/[\\/]/).pop()}`
     : null;
+  const imageCount = scan.image_paths?.length || 1;
+  const showPreviousImage = () => setImageIndex((i) => (i - 1 + imageCount) % imageCount);
+  const showNextImage = () => setImageIndex((i) => (i + 1) % imageCount);
 
   const unconfirmedBoxes = (scan.bounding_boxes || []).filter(b => !b.confirmed);
   const needsReview = scan.pipeline_status === "review_needed" && scan.review_status !== "reviewed";
@@ -380,6 +389,20 @@ export default function ScanDetailPage() {
           </div>
         </div>
       </div>
+
+      {manualReviewChecks.length > 0 && (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <p className="font-bold">Manual review required</p>
+          <p className="mt-1">The following check{manualReviewChecks.length > 1 ? "s" : ""} could not be verified automatically:</p>
+          <ul className="mt-1 list-disc pl-5">
+            {manualReviewChecks.map((check) => (
+              <li key={`${check.field_key}-${check.rule_id || "manual"}`}>
+                {FIELD_LABELS[check.field_key] || check.field_key}: {check.notes || "Additional evidence is required."}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Main layout */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
@@ -669,6 +692,12 @@ export default function ScanDetailPage() {
             <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3">Product Label Photo</h2>
             {imageUrl ? (
               <div className="relative rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
+                {imageCount > 1 && (
+                  <>
+                    <button aria-label="Previous label photo" onClick={showPreviousImage} className="absolute left-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/60 px-3 py-2 text-white">‹</button>
+                    <button aria-label="Next label photo" onClick={showNextImage} className="absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/60 px-3 py-2 text-white">›</button>
+                  </>
+                )}
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   ref={imgRef}
@@ -676,6 +705,13 @@ export default function ScanDetailPage() {
                   alt={scan.product_name || "Label"}
                   className="w-full object-contain max-h-72"
                   onLoad={drawBboxOverlays}
+                  onTouchStart={(event) => { touchStartX.current = event.touches[0]?.clientX ?? null; }}
+                  onTouchEnd={(event) => {
+                    if (touchStartX.current == null) return;
+                    const delta = event.changedTouches[0]?.clientX - touchStartX.current;
+                    if (Math.abs(delta) > 40) delta < 0 ? showNextImage() : showPreviousImage();
+                    touchStartX.current = null;
+                  }}
                 />
                 <canvas
                   ref={canvasRef}
@@ -687,6 +723,7 @@ export default function ScanDetailPage() {
                 No image available
               </div>
             )}
+            {imageCount > 1 && <p className="mt-2 text-center text-xs text-gray-500">Photo {imageIndex + 1} of {imageCount} · swipe or use arrows</p>}
 
             {/* Bounding box review list */}
             {scan.bounding_boxes && scan.bounding_boxes.length > 0 && (

@@ -89,8 +89,28 @@ class Scan(Base):
     @property
     def compliance_summary(self) -> dict:
         from app.services.compliance_engine import summarize_checks
+        checks = self.compliance_checks or []
+        if checks:
+            return summarize_checks(checks)
 
-        return summarize_checks(self.compliance_checks or [])
+        # Older/failed workers may have persisted the denormalized result before
+        # ComplianceCheck rows were written. Never interpret an empty check set
+        # as AllPass (the previous behavior caused false green badges).
+        field_results = self.field_results or {}
+        missing = len(self.missing_fields or [])
+        if self.pipeline_status == "review_needed" or self.review_status == "pending":
+            headline = "NeedsManualReview"
+        elif self.is_compliant is False or missing:
+            headline = "HasFailures"
+        elif self.is_compliant is True and field_results:
+            headline = "AllPass"
+        else:
+            headline = "NeedsManualReview"
+        return {
+            "headline": headline,
+            "counts": {"Pass": sum(1 for v in field_results.values() if v), "Fail": missing, "ManualReviewRequired": 0, "NotApplicable": 0, "Relaxed": 0},
+            "total": len(field_results),
+        }
 
 
 class ManualFinding(Base):

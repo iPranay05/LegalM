@@ -19,7 +19,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-GROQ_MODEL_VISION = "qwen/qwen3.6-27b"   # vision model (image + text)
+GROQ_MODEL_VISION = "qwen/qwen3.8-27b"   # currently available Groq vision/reasoning model
 GROQ_MODEL_TEXT   = "openai/gpt-oss-20b" # text-only model (fast, available on free plan)
 
 _FIELDS_SCHEMA = """{
@@ -40,7 +40,10 @@ _FIELDS_SCHEMA = """{
 _RULES = """Rules:
 - product_name = generic/common name, NOT the brand name
 - brand_name = trade/brand name printed large on the label
-- Extract ONLY what is clearly visible — never invent values
+- Read the entire image, including tiny embossed/inkjet and side-panel text. Mentally zoom into every region before answering; do not rely only on the largest text.
+- First transcribe visible text internally, then map it to fields. Preserve the printed spelling in values, correcting only obvious OCR character errors.
+- Recognize label synonyms and noisy variants: LOT/Lot/LT = batch_number; MFG/MFD/PKD/Manth & Year of Mfg. = mfg_date; EXP/Expiry/Best Before = expiry_date; MRP/M.R.P./incl. of all taxes = mrp; Made in/Country of Origin/Origin = country_of_origin; Net Vol/Contents = net_quantity.
+- For a value that is visible but partly blurred, return the best transcription with confidence below 0.6; for text that cannot be read, return null. Never invent values.
 - Each field must be an object with value, confidence, and approximate normalized bbox [x_min, y_min, x_max, y_max] (0.0 to 1.0)
 - confidence must be a number from 0.0 to 1.0 based only on visual certainty
 - If a field is unclear, partially obscured, or guessed, set value to null or confidence below 0.6
@@ -50,6 +53,7 @@ _RULES = """Rules:
 IMAGE_PROMPT = f"""You are an expert at reading Indian packaged commodity labels under the Legal Metrology (Packaged Commodities) Rules, 2011.
 
 Examine this product label image and extract all visible declaration fields.
+This may be a low-resolution photograph. Inspect all four corners, edges, seals, caps, inkjet print, and side/back panels. Pay special attention to short declarations such as LOT, MFG/MFD, EXP, MRP, and Made in India. Do not confuse a product name with a brand, and do not treat decorative text as a declaration.
 Output ONLY a raw JSON object with these exact keys (null for missing fields):
 
 {_FIELDS_SCHEMA}
@@ -151,8 +155,24 @@ def _parse_json(text: str) -> dict:
     if not text:
         return {}
 
-    # Strip Qwen reasoning blocks
+    # Strip Qwen reasoning blocks. Some responses omit the closing tag; in
+    # that case retain everything from the first JSON object onward.
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if "<think>" in text:
+        text = text.split("<think>", 1)[1]
+        if "}" in text:
+            text = text[text.find("{"):]
+
+    # Models occasionally add a short sentence before JSON. Decode the first
+    # valid object instead of relying on a greedy regex that can include prose.
+    first_object = text.find("{")
+    if first_object > 0:
+        text = text[first_object:]
+    try:
+        decoded, _ = json.JSONDecoder().raw_decode(text)
+        return decoded
+    except json.JSONDecodeError:
+        pass
 
     # Try direct parse
     try:
@@ -205,7 +225,9 @@ def extract_from_image(image_bytes: bytes) -> dict:
                 ],
             }],
             temperature=0.0,
-            max_tokens=1024,
+            max_tokens=2048,
+            reasoning_format="hidden",
+            response_format={"type": "json_object"},
         )
 
         content = response.choices[0].message.content or ""

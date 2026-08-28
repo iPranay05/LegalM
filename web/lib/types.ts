@@ -50,6 +50,7 @@ export interface Scan {
   calibration_method?: string;
   symbols_detected?: SymbolResult;
   is_compliant?: boolean;
+  compliance_headline?: "AllPass" | "HasFailures" | "NeedsManualReview";
   compliance_score?: number;
   field_results?: Record<string, boolean>;
   missing_fields?: string[];
@@ -103,6 +104,7 @@ export interface ComplianceSummary {
 
 export interface BoundingBox {
   field: string;
+  image_index?: number;
   text?: string;
   confidence: number;
   confirmed: boolean;

@@ -3,10 +3,15 @@ interface Props {
   score?: number;
   showScore?: boolean;
   headline?: "AllPass" | "HasFailures" | "NeedsManualReview";
+  pipelineStatus?: string;
 }
 
-export default function ComplianceBadge({ isCompliant, score, showScore = false, headline }: Props) {
-  const status = headline ?? (isCompliant === true ? "AllPass" : isCompliant === false ? "HasFailures" : undefined);
+export default function ComplianceBadge({ isCompliant, score, showScore = false, headline, pipelineStatus }: Props) {
+  // Do not display a contradictory green badge for stale/partial scan payloads.
+  const status = headline
+    ?? (pipelineStatus === "review_needed" ? "NeedsManualReview"
+      : isCompliant === false || (isCompliant === true && score != null && score < 80) ? "HasFailures"
+      : isCompliant === true ? "AllPass" : undefined);
 
   if (status === "AllPass") {
     return (

@@ -4,17 +4,18 @@ import { Colors } from "./Colors";
 
 interface Props {
   isCompliant?: boolean;
-  score?: number;
+  score?: number | null;
   headline?: "AllPass" | "HasFailures" | "NeedsManualReview";
   size?: "sm" | "lg";
 }
 
-export default function ComplianceBadge({ isCompliant, score = 0, headline, size = "sm" }: Props) {
+export default function ComplianceBadge({ isCompliant, score, headline, size = "sm" }: Props) {
   const isLarge = size === "lg";
   const status = headline ?? (isCompliant === true ? "AllPass" : isCompliant === false ? "HasFailures" : "NeedsManualReview");
   const isPass = status === "AllPass";
   const needsReview = status === "NeedsManualReview";
   const label = isPass ? "COMPLIANT" : needsReview ? "NEEDS REVIEW" : "NON-COMPLIANT";
+  const displayScore = typeof score === "number" && Number.isFinite(score) ? score : 0;
 
   return (
     <View style={[styles.container, isLarge && styles.containerLarge,
@@ -29,7 +30,7 @@ export default function ComplianceBadge({ isCompliant, score = 0, headline, size
         </Text>
         <Text style={[styles.score, isLarge && styles.scoreLarge,
           isPass ? styles.passText : needsReview ? styles.reviewText : styles.failText]}>
-          Score: {score.toFixed(1)}%
+          Score: {displayScore.toFixed(1)}%
         </Text>
       </View>
     </View>
