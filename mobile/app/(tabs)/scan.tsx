@@ -1,13 +1,11 @@
 import React, { useState, useRef } from "react";
 import {
   View, Text, TouchableOpacity, StyleSheet, ScrollView,
-  Alert, ActivityIndicator, TextInput, Modal, FlatList,
+  Alert, ActivityIndicator, TextInput, Modal, FlatList, Image,
 } from "react-native";
-import { Image } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useRouter } from "expo-router";
-import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import GovHeader from "../../components/GovHeader";
 import { Colors } from "../../components/Colors";
@@ -201,7 +199,7 @@ export default function ScanScreen() {
                   This code will be decoded and looked up automatically when you submit the scan. Switch to Label Photos to add label images.
                 </Text>
                 <TouchableOpacity style={styles.barcodeClearBtn} onPress={() => { setScannedBarcode(null); barcodeScanned.current = false; }}>
-                  <Text style={styles.barcodeClearText}>✕  Clear &amp; Re-scan</Text>
+                  <Text style={styles.barcodeClearText}>✕  Clear & Re-scan</Text>
                 </TouchableOpacity>
               </View>
             ) : (

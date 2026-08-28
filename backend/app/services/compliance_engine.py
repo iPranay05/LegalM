@@ -197,6 +197,8 @@ class ComplianceCheckResult:
     rule_id: Optional[int] = None
     relaxation_order_id: Optional[int] = None
     notes: Optional[str] = None
+    image_index: Optional[int] = 0
+    bounding_box: Optional[dict] = None
     evaluated_at: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> dict:
@@ -337,6 +339,8 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
     normalized_text = _normalize(ocr_text)
     extracted_fields = scan_context.get("extracted_fields") or {}
     field_confidences = scan_context.get("field_confidences") or {}
+    field_bboxes = scan_context.get("field_bboxes") or {}
+    image_index = scan_context.get("image_index", 0)
     overall_confidence = scan_context.get("overall_confidence", scan_context.get("ocr_confidence"))
     low_confidence = bool(scan_context.get("low_confidence") or scan_context.get("low_confidence_ocr"))
 
@@ -380,6 +384,7 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
             extracted_value = str(value).strip() if _has_extracted_value(value) else _extract_value(key, normalized_text)
             relaxation_order_id = None
             notes = None
+            bbox = field_bboxes.get(key)
 
             # ── CheckType: FontSize ──────────────────────────────────────────
             if check_type == "FontSize":
@@ -488,6 +493,8 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
                     rule_id=rule_id,
                     relaxation_order_id=relaxation_order_id,
                     notes=notes,
+                    image_index=image_index,
+                    bounding_box=bbox,
                     evaluated_at=now,
                 )
             )
@@ -502,6 +509,7 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
         text_present = _check_field(field, normalized_text)
         extracted_value = str(value).strip() if _has_extracted_value(value) else _extract_value(key, normalized_text)
         present = _has_extracted_value(extracted_value) or text_present
+        bbox = field_bboxes.get(key)
 
         if low_confidence or confidence is None or confidence < FIELD_CONFIDENCE_THRESHOLD:
             result = "ManualReviewRequired"
@@ -520,6 +528,8 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
                 confidence=confidence,
                 extracted_value=extracted_value,
                 notes=notes,
+                image_index=image_index,
+                bounding_box=bbox,
                 evaluated_at=now,
             )
         )

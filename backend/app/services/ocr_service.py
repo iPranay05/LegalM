@@ -39,61 +39,103 @@ def _average(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def _derive_field_confidences(raw_text: str, word_data: dict, avg_confidence: float) -> dict:
+def _derive_field_confidences_and_bboxes(
+    raw_text: str, word_data: dict, avg_confidence: float, img_width: int, img_height: int
+) -> tuple[dict, dict]:
     from app.services.compliance_engine import COMPLIANCE_FIELDS, _check_field, _normalize
 
     normalized_text = _normalize(raw_text)
     words = []
-    for text, conf in zip(word_data.get("text", []), word_data.get("conf", [])):
-        token = str(text).strip().lower()
+    n_boxes = len(word_data.get("text", []))
+    for i in range(n_boxes):
+        text = str(word_data["text"][i]).strip().lower()
+        conf = word_data["conf"][i]
         try:
             score = float(conf)
         except (TypeError, ValueError):
             continue
-        if token and score > 0:
-            words.append((token, score / 100))
+        if text and score > 0:
+            left = word_data["left"][i]
+            top = word_data["top"][i]
+            w = word_data["width"][i]
+            h = word_data["height"][i]
+            words.append({
+                "token": text,
+                "score": score / 100,
+                "left": left,
+                "top": top,
+                "right": left + w,
+                "bottom": top + h,
+            })
 
     confidences = {}
+    bboxes = {}
     default_confidence = round(avg_confidence / 100, 2)
+
     for field in COMPLIANCE_FIELDS:
         key = field["key"]
         if not _check_field(field, normalized_text):
             confidences[key] = default_confidence
+            bboxes[key] = None
             continue
 
         markers = [key.replace("_", " ")]
         if key == "manufacturer_info":
-            markers.extend(["manufactured", "packed", "imported", "marketed"])
+            markers.extend(["manufactured", "packed", "imported", "marketed", "mfg by", "pkd by"])
         elif key == "net_quantity":
-            markers.extend(["net", "quantity", "weight", "qty"])
+            markers.extend(["net", "quantity", "weight", "qty", "vol", "g", "kg", "ml", "l"])
         elif key == "mrp":
-            markers.extend(["mrp", "rs", "inr", "price"])
+            markers.extend(["mrp", "rs", "inr", "price", "incl"])
         elif key == "mfg_date":
-            markers.extend(["mfg", "manufactured", "packed"])
+            markers.extend(["mfg", "manufactured", "packed", "pkd", "date"])
         elif key == "expiry_date":
-            markers.extend(["expiry", "exp", "before"])
+            markers.extend(["expiry", "exp", "before", "use by"])
         elif key == "consumer_care":
-            markers.extend(["consumer", "care", "helpline", "contact"])
+            markers.extend(["consumer", "care", "helpline", "contact", "feedback", "email"])
         elif key == "country_of_origin":
-            markers.extend(["origin", "made"])
+            markers.extend(["origin", "made", "country", "india"])
         elif key == "fssai_number":
-            markers.extend(["fssai", "licence", "license"])
+            markers.extend(["fssai", "licence", "license", "lic"])
 
         marker_tokens = {token for marker in markers for token in marker.split()}
-        matched_scores = [score for token, score in words if token.strip(".:") in marker_tokens]
-        confidences[key] = round(_average(matched_scores) if matched_scores else default_confidence, 2)
+        matched_words = [w for w in words if w["token"].strip(".:,") in marker_tokens]
 
-    return confidences
+        if matched_words:
+            confidences[key] = round(_average([w["score"] for w in matched_words]), 2)
+            min_l = min(w["left"] for w in matched_words)
+            min_t = min(w["top"] for w in matched_words)
+            max_r = max(w["right"] for w in matched_words)
+            max_b = max(w["bottom"] for w in matched_words)
+
+            x_min = round(max(0.0, min_l / img_width), 4)
+            y_min = round(max(0.0, min_t / img_height), 4)
+            x_max = round(min(1.0, max_r / img_width), 4)
+            y_max = round(min(1.0, max_b / img_height), 4)
+
+            bboxes[key] = {
+                "x_min": x_min,
+                "y_min": y_min,
+                "x_max": x_max,
+                "y_max": y_max,
+                "bbox_source": "ocr_word_match",
+            }
+        else:
+            confidences[key] = default_confidence
+            bboxes[key] = None
+
+    return confidences, bboxes
 
 
 def _tesseract_extract(image_bytes: bytes) -> dict:
-    """Run Tesseract OCR and return text + confidence."""
+    """Run Tesseract OCR and return text + confidence + word bounding boxes."""
     if not TESSERACT_AVAILABLE:
         return {"text": "", "confidence": 0.0, "success": False,
-                "error": "Tesseract not installed", "source": "tesseract"}
+                "error": "Tesseract not installed", "source": "tesseract", "field_bboxes": {}}
     try:
         image = Image.open(io.BytesIO(image_bytes))
+        orig_w, orig_h = image.size
         processed = preprocess_image(image)
+        proc_w, proc_h = processed.size
 
         try:
             raw_text = pytesseract.image_to_string(processed, lang="eng+hin")
@@ -110,10 +152,15 @@ def _tesseract_extract(image_bytes: bytes) -> dict:
         except Exception:
             avg_confidence = 0.0
 
+        field_confs, field_bboxes = _derive_field_confidences_and_bboxes(
+            raw_text, data, avg_confidence, proc_w, proc_h
+        )
+
         return {
             "text": raw_text.strip(),
             "confidence": round(avg_confidence, 2),
-            "field_confidences": _derive_field_confidences(raw_text, data, avg_confidence),
+            "field_confidences": field_confs,
+            "field_bboxes": field_bboxes,
             "success": True,
             "error": None,
             "source": "tesseract",
@@ -121,7 +168,7 @@ def _tesseract_extract(image_bytes: bytes) -> dict:
     except Exception as e:
         logger.exception("Tesseract OCR failed")
         return {"text": "", "confidence": 0.0, "success": False,
-                "error": str(e), "source": "tesseract"}
+                "error": str(e), "source": "tesseract", "field_bboxes": {}}
 
 
 def extract_text_from_bytes(image_bytes: bytes) -> dict:
@@ -129,11 +176,11 @@ def extract_text_from_bytes(image_bytes: bytes) -> dict:
     Primary entry point for the pipeline.
 
     1. Try Groq vision model — returns structured fields directly as JSON text
-       (highly accurate, handles Hindi, low contrast, angled photos).
+       along with visual estimate bounding boxes.
     2. Fall back to Tesseract if Groq is unavailable or fails.
 
     Always returns:
-      text, confidence, success, error, source ("groq_vision" | "tesseract")
+      text, confidence, success, error, source ("groq_vision" | "tesseract"), field_bboxes
     """
     from app.services.groq_service import extract_from_image, _get_api_key
 
@@ -141,9 +188,8 @@ def extract_text_from_bytes(image_bytes: bytes) -> dict:
         groq_result = extract_from_image(image_bytes)
         groq_fields = groq_result.get("fields", {}) if isinstance(groq_result, dict) else {}
         field_confidences = groq_result.get("field_confidences", {}) if isinstance(groq_result, dict) else {}
+        field_bboxes = groq_result.get("field_bboxes", {}) if isinstance(groq_result, dict) else {}
         if groq_fields:
-            # Convert structured fields back to readable text for downstream
-            # compliance engine (which expects raw text to keyword-match against)
             text_lines = []
             for key, val in groq_fields.items():
                 if val:
@@ -159,10 +205,11 @@ def extract_text_from_bytes(image_bytes: bytes) -> dict:
                 "text": synthesized_text,
                 "confidence": overall_confidence,
                 "field_confidences": field_confidences,
+                "field_bboxes": field_bboxes,
                 "success": True,
                 "error": None,
                 "source": "groq_vision",
-                "groq_fields": groq_fields,  # pass structured fields upstream
+                "groq_fields": groq_fields,
             }
         else:
             logger.info("Groq vision returned empty — falling back to Tesseract")

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, FormEvent } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import ComplianceBadge from "@/components/ComplianceBadge";
@@ -42,7 +42,7 @@ export default function ScanDetailPage() {
 
   useEffect(() => {
     if (!localStorage.getItem("auth_token")) { router.push("/login"); return; }
-    let intervalId: NodeJS.Timeout | null = null;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
 
     async function checkStatusAndLoad() {
       try {
@@ -106,29 +106,77 @@ export default function ScanDetailPage() {
   function drawBboxOverlays() {
     const canvas = canvasRef.current;
     const img = imgRef.current;
-    if (!canvas || !img || !scan?.bounding_boxes) return;
+    if (!canvas || !img) return;
     canvas.width = img.naturalWidth;
     canvas.height = img.naturalHeight;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    scan.bounding_boxes.forEach((box) => {
-      if (!box.bbox) return;
-      const [x, y, w, h] = box.bbox;
-      const confirmed = box.confirmed;
-      ctx.strokeStyle = confirmed ? "#1a7a3c" : "#e67e22";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, w, h);
+    const boxes = scan?.bounding_boxes || [];
+    boxes.forEach((box) => {
+      let x = 0, y = 0, w = 0, h = 0;
+      const rawBox = box.bbox;
+      if (!rawBox) return;
 
-      // Label background
-      ctx.fillStyle = confirmed ? "rgba(26,122,60,0.85)" : "rgba(230,126,34,0.85)";
-      const label = FIELD_LABELS[box.field] || box.field;
+      if (typeof rawBox === "object" && !Array.isArray(rawBox)) {
+        const xMin = Number(rawBox.x_min ?? 0);
+        const yMin = Number(rawBox.y_min ?? 0);
+        const xMax = Number(rawBox.x_max ?? 0);
+        const yMax = Number(rawBox.y_max ?? 0);
+        x = xMin <= 1.0 ? xMin * canvas.width : xMin;
+        y = yMin <= 1.0 ? yMin * canvas.height : yMin;
+        const r = xMax <= 1.0 ? xMax * canvas.width : xMax;
+        const b = yMax <= 1.0 ? yMax * canvas.height : yMax;
+        w = r - x;
+        h = b - y;
+      } else if (Array.isArray(rawBox) && rawBox.length === 4) {
+        if (rawBox[0] <= 1.0 && rawBox[2] <= 1.0) {
+          x = rawBox[0] * canvas.width;
+          y = rawBox[1] * canvas.height;
+          w = (rawBox[2] - rawBox[0]) * canvas.width;
+          h = (rawBox[3] - rawBox[1]) * canvas.height;
+        } else {
+          [x, y, w, h] = rawBox;
+        }
+      }
+
+      if (w <= 0 || h <= 0) return;
+
+      const conf = box.confidence != null ? (box.confidence > 1 ? box.confidence / 100 : box.confidence) : 0;
+      const isVision = box.bbox_source === "vision_estimate" || (typeof rawBox === "object" && (rawBox as any).bbox_source === "vision_estimate");
+
+      // Confidence-color: Green >= 70%, Amber 40-70%, Red < 40%
+      let strokeColor = "#1a7a3c";
+      let bgColor = "rgba(26,122,60,0.85)";
+      if (conf < 0.4) {
+        strokeColor = "#c0392b";
+        bgColor = "rgba(192,57,43,0.85)";
+      } else if (conf < 0.7) {
+        strokeColor = "#e67e22";
+        bgColor = "rgba(230,126,34,0.85)";
+      }
+
+      ctx.save();
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 3;
+      if (isVision) {
+        ctx.setLineDash([6, 4]); // Dashed outline indicates approximate vision estimate
+      } else {
+        ctx.setLineDash([]);
+      }
+      ctx.strokeRect(x, y, w, h);
+      ctx.restore();
+
+      // Label background & text
+      const srcText = isVision ? " [Approx]" : " [OCR]";
+      const label = (FIELD_LABELS[box.field] || box.field) + srcText + ` · ${Math.round(conf * 100)}%`;
       ctx.font = "bold 12px Arial";
       const tw = ctx.measureText(label).width;
-      ctx.fillRect(x, y - 18, tw + 8, 18);
-      ctx.fillStyle = "#fff";
-      ctx.fillText(label, x + 4, y - 4);
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(x, Math.max(0, y - 20), tw + 8, 20);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(label, x + 4, Math.max(14, y - 5));
     });
   }
 

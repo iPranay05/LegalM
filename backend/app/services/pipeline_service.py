@@ -121,8 +121,9 @@ def run_pipeline_sync(image_bytes: bytes,
     ocr_confidence = ocr.get("confidence", 0.0)
     ocr_low = ocr.get("low_confidence", False)
     groq_used = ocr.get("source") == "groq_vision"
-    extracted_fields = ocr.get("extracted_fields") or {}
+    extracted_fields = ocr.get("extracted_fields") or ocr.get("groq_fields") or {}
     field_confidences = ocr.get("field_confidences") or {}
+    field_bboxes = ocr.get("field_bboxes") or {}
 
     # ── Stages 3 & 4: Calibration + Symbol detection ─────────────────────────
     calibration = run_calibration_stage(
@@ -156,6 +157,8 @@ def run_pipeline_sync(image_bytes: bytes,
         "calibration": calibration,
         "extracted_fields": extracted_fields,
         "field_confidences": field_confidences,
+        "field_bboxes": field_bboxes,
+        "image_index": 0,
         "overall_confidence": ocr_confidence,
         "low_confidence": ocr_low,
         "db": db,
@@ -164,7 +167,9 @@ def run_pipeline_sync(image_bytes: bytes,
     })
 
     # ── Bounding boxes ────────────────────────────────────────────────────────
-    bounding_boxes = _build_bounding_boxes(compliance["extracted_fields"], ocr_confidence)
+    bounding_boxes = _build_bounding_boxes(
+        compliance["extracted_fields"], ocr_confidence, field_confidences, field_bboxes
+    )
 
     # ── Pipeline status ───────────────────────────────────────────────────────
     needs_review = compliance["compliance_summary"]["headline"] == "NeedsManualReview"
@@ -192,17 +197,25 @@ def run_pipeline_sync(image_bytes: bytes,
     }
 
 
-def _build_bounding_boxes(extracted_fields: dict, ocr_confidence: float) -> list:
-    """Build bounding box annotations from extracted field values."""
+def _build_bounding_boxes(extracted_fields: dict, ocr_confidence: float,
+                          field_confidences: dict = None, field_bboxes: dict = None) -> list:
+    """Build bounding box annotations from extracted field values with real localization."""
+    field_confidences = field_confidences or {}
+    field_bboxes = field_bboxes or {}
     boxes = []
     for field_key, value in extracted_fields.items():
         if value:
+            conf = field_confidences.get(field_key)
+            if conf is None:
+                conf = round(ocr_confidence / 100, 2)
+            bbox = field_bboxes.get(field_key)
             boxes.append({
                 "field": field_key,
                 "text": value,
-                "confidence": round(ocr_confidence / 100, 2),
-                "confirmed": ocr_confidence >= OCR_CONFIDENCE_THRESHOLD,
-                "bbox": None,
+                "confidence": round(conf, 2),
+                "confirmed": conf >= (OCR_CONFIDENCE_THRESHOLD / 100 if conf <= 1.0 else OCR_CONFIDENCE_THRESHOLD),
+                "bbox": bbox,
+                "bbox_source": bbox.get("bbox_source") if bbox else None,
             })
     return boxes
 
@@ -281,6 +294,8 @@ def run_pipeline_task(self, scan_id: str, image_path: str, category: str):
                         extracted_value=check.get("extracted_value") if isinstance(check, dict) else getattr(check, "extracted_value", None),
                         relaxation_order_id=check.get("relaxation_order_id") if isinstance(check, dict) else getattr(check, "relaxation_order_id", None),
                         notes=check.get("notes") if isinstance(check, dict) else getattr(check, "notes", None),
+                        image_index=check.get("image_index", 0) if isinstance(check, dict) else getattr(check, "image_index", 0),
+                        bounding_box=check.get("bounding_box") if isinstance(check, dict) else getattr(check, "bounding_box", None),
                     )
                 )
 

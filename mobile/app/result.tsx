@@ -344,6 +344,36 @@ export default function ResultScreen() {
           </View>
         )}
 
+        {/* Declaration Evidence & Localization */}
+        {result.bounding_boxes && result.bounding_boxes.length > 0 && (
+          <View style={styles.evidenceCard}>
+            <Text style={styles.sectionLabel}>Declaration Evidence & Localization</Text>
+            <View style={{ gap: 8, marginTop: 8 }}>
+              {result.bounding_boxes.map((b) => {
+                const conf = b.confidence != null ? (b.confidence > 1 ? b.confidence / 100 : b.confidence) : 0;
+                const isVision = b.bbox_source === "vision_estimate" || (b.bbox && typeof b.bbox === "object" && (b.bbox as any).bbox_source === "vision_estimate");
+                const color = conf >= 0.7 ? Colors.success : (conf >= 0.4 ? Colors.warning : Colors.danger);
+                const sourceBadge = isVision ? "Vision Estimate" : "OCR Word Match";
+
+                return (
+                  <View key={b.field} style={[styles.evidenceRow, { borderLeftColor: color, borderLeftWidth: 4 }]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.evidenceField}>{b.field.replace(/_/g, " ").toUpperCase()}</Text>
+                      {b.text ? <Text style={styles.evidenceText} numberOfLines={2}>"{b.text}"</Text> : null}
+                      <Text style={styles.evidenceMeta}>
+                        {sourceBadge} · Confidence: {Math.round(conf * 100)}%
+                      </Text>
+                    </View>
+                    <View style={[styles.confPill, { backgroundColor: color + "20" }]}>
+                      <Text style={[styles.confPillText, { color }]}>{Math.round(conf * 100)}%</Text>
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        )}
+
         {/* Four-tab section */}
         <View style={styles.tabSection}>
           {/* Tab bar */}
@@ -719,6 +749,22 @@ const styles = StyleSheet.create({
     borderRadius: 12, alignItems: "center", elevation: 2,
   },
   newScanBtnText: { color: Colors.white, fontSize: 15, fontWeight: "700" },
+
+  // Evidence
+  evidenceCard: {
+    backgroundColor: Colors.white, borderRadius: 12, padding: 16,
+    marginBottom: 16, borderWidth: 1, borderColor: Colors.border,
+  },
+  evidenceRow: {
+    backgroundColor: Colors.offWhite, borderRadius: 8, padding: 10,
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    borderWidth: 1, borderColor: Colors.border,
+  },
+  evidenceField: { fontSize: 11, fontWeight: "700", color: Colors.textSecondary, letterSpacing: 0.5 },
+  evidenceText: { fontSize: 13, fontWeight: "600", color: Colors.text, marginTop: 2 },
+  evidenceMeta: { fontSize: 10, color: Colors.textMuted, marginTop: 3, fontStyle: "italic" },
+  confPill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  confPillText: { fontSize: 12, fontWeight: "800" },
 
   // Modal
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },

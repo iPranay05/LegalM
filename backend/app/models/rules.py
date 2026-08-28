@@ -118,6 +118,8 @@ class ComplianceCheck(Base):
     )
     confidence = Column(Float, nullable=True)
     extracted_value = Column(String, nullable=True)
+    image_index = Column(Integer, default=0, nullable=True)
+    bounding_box = Column(JSON, nullable=True)  # {'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float, 'bbox_source': str}
     relaxation_order_id = Column(Integer, ForeignKey("relaxation_orders.id"), nullable=True)
     notes = Column(Text, nullable=True)
     evaluated_at = Column(DateTime, default=datetime.utcnow, nullable=False)

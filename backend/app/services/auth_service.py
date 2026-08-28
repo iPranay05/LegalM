@@ -1,10 +1,14 @@
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Any
 from jose import JWTError, jwt
+# pyrefly: ignore [missing-import]
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from app.config import settings
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.models.scan import Scan
+from app.models.product import Product
+from app.models.manufacturer import Manufacturer
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -20,7 +24,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + (
+    expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     to_encode.update({"exp": expire})
@@ -45,19 +49,13 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
     return user
 
 
-def scope_scans_for_user(query, user: User, db: Session):
+def scope_scans_for_user(query: Any, user: User, db: Session):
     """
     Scopes a Scan query to the user's role permissions:
     - Inspector: sees only scans where inspector_id == user.id
     - Controller / Analyst: sees all scans
-    - ManufacturerSelfCheck: sees only scans whose linked Product.manufacturer_id
-      matches the manufacturer linked to their account (Manufacturer.contact_email == user.email)
+    - ManufacturerSelfCheck: sees scans linked to their manufacturer account or uploaded by them
     """
-    from app.models.scan import Scan
-    from app.models.product import Product
-    from app.models.manufacturer import Manufacturer
-    from app.models.user import UserRole
-
     role_val = user.role.value if isinstance(user.role, UserRole) else str(user.role)
 
     if role_val == UserRole.Inspector.value:
@@ -65,9 +63,10 @@ def scope_scans_for_user(query, user: User, db: Session):
     elif role_val == UserRole.ManufacturerSelfCheck.value:
         mfr = db.query(Manufacturer).filter(Manufacturer.contact_email == user.email).first()
         if not mfr:
-            # No linked manufacturer -> empty query
-            return query.filter(Scan.id == -1)
-        return query.join(Product, Scan.product_id == Product.id).filter(Product.manufacturer_id == mfr.id)
+            return query.filter(Scan.inspector_id == user.id)
+        return query.outerjoin(Product, Scan.product_id == Product.id).filter(
+            (Scan.inspector_id == user.id) | (Product.manufacturer_id == mfr.id)
+        )
     elif role_val in (UserRole.Controller.value, UserRole.Analyst.value):
         return query
     # Fallback to own scans for safety
