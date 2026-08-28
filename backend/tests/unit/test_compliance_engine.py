@@ -58,3 +58,22 @@ def test_headline_summary_manual_review_takes_priority_over_failures():
     assert summary["headline"] == "NeedsManualReview"
     assert summary["counts"]["Fail"] == 1
     assert summary["counts"]["ManualReviewRequired"] == 1
+
+
+def test_headline_summary_all_pass():
+    summary = summarize_checks([
+        ComplianceCheckResult(field_key="mrp", result="Pass", confidence=0.95),
+        ComplianceCheckResult(field_key="net_quantity", result="Pass", confidence=0.92),
+    ])
+    assert summary["headline"] == "AllPass"
+    assert summary["counts"]["Pass"] == 2
+
+
+def test_headline_summary_has_failures():
+    summary = summarize_checks([
+        ComplianceCheckResult(field_key="mrp", result="Pass", confidence=0.95),
+        ComplianceCheckResult(field_key="net_quantity", result="Fail", confidence=0.90),
+    ])
+    assert summary["headline"] == "HasFailures"
+    assert summary["counts"]["Fail"] == 1
+    assert summary["counts"]["Pass"] == 1
