@@ -3,9 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, date
 from app.database import get_db
-from app.models.rules import Rule, RelaxationOrder
+from app.models.rules import Rule, RelaxationOrder, RuleCheckType
+from app.models.manufacturer import Manufacturer
+from app.models.product import Product
 from app.models.user import User, UserRole
 from app.routers.deps import get_current_user, require_admin
 from app.services.auth_service import hash_password, get_user_by_email
@@ -18,10 +20,16 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 # ── Rule schemas ──────────────────────────────────────────────────────────────
 
 class RuleCreate(BaseModel):
+    rule_family: str = Field(default="general", description="Stable slug grouping rule versions across amendments")
     code: str
     title: str
     description: Optional[str] = None
     legal_reference: Optional[str] = None
+    effective_from: date = Field(default_factory=lambda: date(2011, 4, 1))
+    effective_to: Optional[date] = None
+    has_transitional_clause: bool = False
+    commodity_category_id: Optional[int] = None
+    check_type: RuleCheckType = RuleCheckType.Presence
     category_scope: Optional[List[str]] = None
     is_mandatory: bool = True
     is_conduct_bucket: bool = False
@@ -30,16 +38,22 @@ class RuleCreate(BaseModel):
 
 class RuleOut(BaseModel):
     id: int
+    rule_family: str
     code: str
     title: str
-    description: Optional[str]
-    legal_reference: Optional[str]
-    category_scope: Optional[List[str]]
+    description: Optional[str] = None
+    legal_reference: Optional[str] = None
+    effective_from: date
+    effective_to: Optional[date] = None
+    has_transitional_clause: bool = False
+    commodity_category_id: Optional[int] = None
+    check_type: RuleCheckType = RuleCheckType.Presence
+    category_scope: Optional[List[str]] = None
     is_mandatory: bool
     is_conduct_bucket: bool
     weight: int
     is_active: bool
-    retired_at: Optional[datetime]
+    retired_at: Optional[datetime] = None
     created_at: datetime
     relaxation_count: Optional[int] = 0
     class Config:
@@ -51,26 +65,30 @@ class RuleOut(BaseModel):
 class RelaxationCreate(BaseModel):
     order_number: str
     rule_id: int
+    manufacturer_id: int
+    product_id: Optional[int] = None
     title: str
     description: Optional[str] = None
     gazette_reference: Optional[str] = None
     applies_to_categories: Optional[List[str]] = None
     applies_to_states: Optional[List[str]] = None
-    valid_from: datetime
-    valid_until: Optional[datetime] = None
+    valid_from: date = Field(default_factory=date.today)
+    valid_until: date
 
 
 class RelaxationOut(BaseModel):
     id: int
     order_number: str
     rule_id: int
+    manufacturer_id: int
+    product_id: Optional[int] = None
     title: str
-    description: Optional[str]
-    gazette_reference: Optional[str]
-    applies_to_categories: Optional[List[str]]
-    applies_to_states: Optional[List[str]]
-    valid_from: datetime
-    valid_until: Optional[datetime]
+    description: Optional[str] = None
+    gazette_reference: Optional[str] = None
+    applies_to_categories: Optional[List[str]] = None
+    applies_to_states: Optional[List[str]] = None
+    valid_from: date
+    valid_until: date
     is_active: bool
     created_at: datetime
     class Config:
@@ -102,15 +120,18 @@ class UserRoleUpdate(BaseModel):
 @router.get("/rules", response_model=List[RuleOut])
 def list_rules(
     include_retired: bool = Query(False),
-    category: Optional[str] = Query(None),
+    category_id: Optional[int] = Query(None),
+    rule_family: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     q = db.query(Rule)
     if not include_retired:
         q = q.filter(Rule.is_active == True)
-    if category:
-        q = q.filter(Rule.category_scope.contains([category]))
+    if category_id is not None:
+        q = q.filter((Rule.commodity_category_id == category_id) | (Rule.commodity_category_id == None))
+    if rule_family:
+        q = q.filter(Rule.rule_family == rule_family)
     rules = q.order_by(Rule.code).all()
     # Annotate with relaxation count
     result = []
@@ -161,8 +182,8 @@ def retire_rule(
     current_user: User = Depends(require_admin),
 ):
     """
-    Retire (soft-delete) a rule. Warns if active relaxation orders reference it.
-    Rules are never hard-deleted.
+    Retire (soft-delete) a rule. Sets effective_to = today, is_active = False,
+    and records retired_at audit timestamp. Rules are never hard-deleted.
     """
     rule = db.query(Rule).filter(Rule.id == rule_id).first()
     if not rule:
@@ -176,6 +197,7 @@ def retire_rule(
     ).scalar() or 0
 
     rule.is_active = False
+    rule.effective_to = datetime.utcnow().date()
     rule.retired_at = datetime.utcnow()
     rule.retired_by_id = current_user.id
     db.commit()
@@ -183,6 +205,7 @@ def retire_rule(
     return {
         "detail": "Rule retired successfully",
         "rule_id": rule_id,
+        "effective_to": str(rule.effective_to),
         "warning": (
             f"{active_relaxations} active relaxation order(s) reference this rule"
             if active_relaxations > 0 else None
@@ -195,6 +218,7 @@ def retire_rule(
 @router.get("/relaxations", response_model=List[RelaxationOut])
 def list_relaxations(
     rule_id: Optional[int] = Query(None),
+    manufacturer_id: Optional[int] = Query(None),
     active_only: bool = Query(True),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -204,6 +228,8 @@ def list_relaxations(
         q = q.filter(RelaxationOrder.is_active == True)
     if rule_id:
         q = q.filter(RelaxationOrder.rule_id == rule_id)
+    if manufacturer_id:
+        q = q.filter(RelaxationOrder.manufacturer_id == manufacturer_id)
     return q.order_by(RelaxationOrder.created_at.desc()).all()
 
 
@@ -218,9 +244,23 @@ def create_relaxation(
     ).first()
     if existing:
         raise HTTPException(status_code=400, detail="Order number already exists")
+    
     rule = db.query(Rule).filter(Rule.id == payload.rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
+    
+    mfr = db.query(Manufacturer).filter(Manufacturer.id == payload.manufacturer_id).first()
+    if not mfr:
+        raise HTTPException(status_code=404, detail="Manufacturer not found")
+    
+    if payload.product_id:
+        prod = db.query(Product).filter(
+            Product.id == payload.product_id,
+            Product.manufacturer_id == payload.manufacturer_id
+        ).first()
+        if not prod:
+            raise HTTPException(status_code=400, detail="Product not found or does not belong to specified manufacturer")
+
     order = RelaxationOrder(**payload.model_dump(), created_by_id=current_user.id)
     db.add(order)
     db.commit()

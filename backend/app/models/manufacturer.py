@@ -23,3 +23,4 @@ class Manufacturer(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     products = relationship("Product", back_populates="manufacturer")
+    relaxation_orders = relationship("RelaxationOrder", back_populates="manufacturer")

@@ -35,6 +35,8 @@ export interface Scan {
   product_name?: string;
   brand_name?: string;
   category?: string;
+  commodity_category_id?: number;
+  commodity_category?: CommodityCategory;
   shop_name?: string;
   location?: string;
   state?: string;
@@ -148,6 +150,16 @@ export interface FieldTabEntry {
 
 // ── Products & Manufacturers ──────────────────────────────────────────────────
 
+export interface CommodityCategory {
+  id: number;
+  name: string;
+  is_food: boolean;
+  is_medical_device: boolean;
+  requires_standard_size: boolean;
+  font_rule_exempted: boolean;
+  created_at?: string;
+}
+
 export interface Manufacturer {
   id: number;
   name: string;
@@ -169,6 +181,8 @@ export interface Product {
   name: string;
   brand_name?: string;
   category?: string;
+  commodity_category_id?: number;
+  commodity_category?: CommodityCategory;
   sku?: string;
   barcode?: string;
   description?: string;
@@ -184,12 +198,27 @@ export interface Product {
 
 // ── Rules & Relaxations ───────────────────────────────────────────────────────
 
+export type RuleCheckType =
+  | "Presence"
+  | "Format"
+  | "Placement"
+  | "FontSize"
+  | "Symbol"
+  | "StandardSize"
+  | "Exemption";
+
 export interface Rule {
   id: number;
+  rule_family: string;
   code: string;
   title: string;
   description?: string;
   legal_reference?: string;
+  effective_from: string;
+  effective_to?: string;
+  has_transitional_clause?: boolean;
+  commodity_category_id?: number;
+  check_type: RuleCheckType;
   category_scope?: string[];
   is_mandatory: boolean;
   is_conduct_bucket: boolean;
@@ -204,13 +233,15 @@ export interface RelaxationOrder {
   id: number;
   order_number: string;
   rule_id: number;
+  manufacturer_id: number;
+  product_id?: number;
   title: string;
   description?: string;
   gazette_reference?: string;
   applies_to_categories?: string[];
   applies_to_states?: string[];
   valid_from: string;
-  valid_until?: string;
+  valid_until: string;
   is_active: boolean;
   created_at: string;
 }

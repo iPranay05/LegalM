@@ -1,32 +1,35 @@
 """
 Compliance Engine for Legal Metrology (Packaged Commodities) Rules, 2011.
 
-Mandatory declarations per Rule 6:
-1.  Name and address of manufacturer / packer / importer
-2.  Common or generic name of the commodity
-3.  Net quantity (weight / volume / count)
-4.  Month and year of manufacture / packing / import
-5.  Best before / use by date (for applicable categories)
-6.  Maximum Retail Price (MRP) inclusive of all taxes
-7.  Consumer Care / Grievance contact details
-8.  Country of origin (for imported goods)
-9.  FSSAI licence number (for food products)
+Versioned, category-aware rule engine with 5-outcome evaluation and
+confidence-gated decision support.
 
-Each field carries a weight. Score = sum of weights for present fields / total weight * 100
+Outcomes (ComplianceCheckResult):
+- Pass: Confident presence and compliance with rule specifications.
+- Fail: Confident absence or violation of rule specifications.
+- ManualReviewRequired: Extraction or calibration confidence below threshold. Never guesses.
+- NotApplicable: Rule does not apply to this commodity category / evaluation date.
+- Relaxed: Confirmed non-compliance excused by a valid, active RelaxationOrder.
 """
 
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
-from typing import Optional, Sequence
+from datetime import datetime, date
+from typing import Optional, Sequence, List, Union
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
+from app.models.rules import Rule, RelaxationOrder, RuleCheckType, ComplianceCheckResult as ModelCheckResult
+from app.models.commodity_category import CommodityCategory
 
 # ---------------------------------------------------------------------------
-# Field definitions — name, weight, patterns, description
+# Default field patterns catalog (used for Presence/Format rule dispatch)
 # ---------------------------------------------------------------------------
 
 COMPLIANCE_FIELDS = [
     {
         "key": "manufacturer_info",
+        "rule_family": "manufacturer_info",
         "label": "Manufacturer / Packer / Importer Name & Address",
         "weight": 15,
         "required": True,
@@ -44,15 +47,17 @@ COMPLIANCE_FIELDS = [
     },
     {
         "key": "product_name",
+        "rule_family": "product_name",
         "label": "Common / Generic Name of Commodity",
         "weight": 10,
         "required": True,
-        "patterns": [],  # Always check — any non-empty OCR text implies product name present
+        "patterns": [],
         "description": "Rule 6(1)(b) - Generic name of the product",
-        "auto_detect": True,  # If OCR returns text, we assume name is present
+        "auto_detect": True,
     },
     {
         "key": "net_quantity",
+        "rule_family": "net_quantity",
         "label": "Net Quantity",
         "weight": 15,
         "required": True,
@@ -66,6 +71,7 @@ COMPLIANCE_FIELDS = [
     },
     {
         "key": "mfg_date",
+        "rule_family": "mfg_date",
         "label": "Date of Manufacture / Packing",
         "weight": 15,
         "required": True,
@@ -81,9 +87,10 @@ COMPLIANCE_FIELDS = [
     },
     {
         "key": "expiry_date",
+        "rule_family": "expiry_date",
         "label": "Best Before / Use By / Expiry Date",
         "weight": 10,
-        "required": False,  # Not mandatory for all categories
+        "required": False,
         "patterns": [
             r"best\s*before",
             r"use\s*by",
@@ -100,6 +107,7 @@ COMPLIANCE_FIELDS = [
     },
     {
         "key": "mrp",
+        "rule_family": "mrp",
         "label": "Maximum Retail Price (MRP)",
         "weight": 15,
         "required": True,
@@ -119,6 +127,7 @@ COMPLIANCE_FIELDS = [
     },
     {
         "key": "consumer_care",
+        "rule_family": "consumer_care",
         "label": "Consumer Care / Grievance Contact",
         "weight": 10,
         "required": True,
@@ -127,7 +136,7 @@ COMPLIANCE_FIELDS = [
             r"toll[\s-]*free",
             r"customer\s*(care|service|support)",
             r"helpline",
-            r"1800[\s-]*\d",  # Indian toll-free format
+            r"1800[\s-]*\d",
             r"contact\s*us",
             r"उपभोक्ता\s*सेवा",
             r"शिकायत",
@@ -136,9 +145,10 @@ COMPLIANCE_FIELDS = [
     },
     {
         "key": "country_of_origin",
+        "rule_family": "country_of_origin",
         "label": "Country of Origin",
         "weight": 5,
-        "required": False,  # Required only for imports
+        "required": False,
         "patterns": [
             r"country\s*of\s*origin",
             r"made\s*in\s+[a-z]+",
@@ -150,24 +160,23 @@ COMPLIANCE_FIELDS = [
     },
     {
         "key": "fssai_number",
+        "rule_family": "fssai_number",
         "label": "FSSAI Licence Number",
         "weight": 5,
-        "required": False,  # Required for food products
+        "required": False,
         "patterns": [
             r"fssai",
             r"food\s*safety",
             r"lic\.?\s*no\.?\s*\d",
             r"licence\s*no",
             r"fssai\s*lic",
-            r"\b\d{14}\b",  # 14-digit FSSAI number
+            r"\b\d{14}\b",
         ],
         "description": "FSSAI licence number (mandatory for food products)",
     },
 ]
 
-TOTAL_MANDATORY_WEIGHT = sum(
-    f["weight"] for f in COMPLIANCE_FIELDS if f["required"]
-)
+COMPLIANCE_FIELD_MAP = {f["key"]: f for f in COMPLIANCE_FIELDS}
 
 FIELD_CONFIDENCE_THRESHOLD = 0.6
 CHECK_RESULTS = (
@@ -197,6 +206,58 @@ class ComplianceCheckResult:
 
 
 # ---------------------------------------------------------------------------
+# Rule Selection Query (Plan §3.2 point 4)
+# ---------------------------------------------------------------------------
+
+def get_active_rules(
+    category: Optional[Union[CommodityCategory, int, str]] = None,
+    evaluation_date: Optional[Union[date, datetime]] = None,
+    db: Optional[Session] = None,
+) -> List[Rule]:
+    """
+    Select active rules applicable to a commodity category as of evaluation_date.
+    
+    Query:
+      Rule.is_active == True,
+      effective_from <= evaluation_date,
+      (effective_to is null or effective_to >= evaluation_date),
+      (commodity_category_id is null or commodity_category_id == category.id)
+    """
+    if db is None:
+        return []
+
+    if evaluation_date is None:
+        eval_d = date.today()
+    elif isinstance(evaluation_date, datetime):
+        eval_d = evaluation_date.date()
+    else:
+        eval_d = evaluation_date
+
+    cat_id = None
+    if isinstance(category, CommodityCategory):
+        cat_id = category.id
+    elif isinstance(category, int):
+        cat_id = category
+    elif isinstance(category, str) and category:
+        cat_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike(category.strip())).first()
+        if cat_obj:
+            cat_id = cat_obj.id
+
+    q = db.query(Rule).filter(
+        Rule.is_active == True,
+        Rule.effective_from <= eval_d,
+        or_(Rule.effective_to == None, Rule.effective_to >= eval_d),
+    )
+
+    if cat_id is not None:
+        q = q.filter(or_(Rule.commodity_category_id == None, Rule.commodity_category_id == cat_id))
+    else:
+        q = q.filter(Rule.commodity_category_id == None)
+
+    return q.order_by(Rule.code).all()
+
+
+# ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
 
@@ -208,9 +269,9 @@ def _normalize(text: str) -> str:
 def _check_field(field: dict, text: str) -> bool:
     """Return True if the field is detected in the OCR text."""
     if field.get("auto_detect"):
-        return len(text.strip()) > 10  # If OCR produced meaningful text, name is there
+        return len(text.strip()) > 10
 
-    for pattern in field["patterns"]:
+    for pattern in field.get("patterns", []):
         if re.search(pattern, text, re.IGNORECASE):
             return True
     return False
@@ -219,7 +280,6 @@ def _check_field(field: dict, text: str) -> bool:
 def _extract_value(key: str, text: str) -> Optional[str]:
     """
     Attempt to extract the actual value of a field from OCR text.
-    Returns a short snippet for display purposes.
     """
     extractors = {
         "net_quantity": r"\b(\d+\.?\d*\s*(g|gm|grams?|kg|kgs?|ml|millilitre|l|litres?|oz|lb|lbs?|pcs|pieces|nos|units|count))\b",
@@ -260,13 +320,18 @@ def _has_extracted_value(value) -> bool:
     return value is not None and str(value).strip() not in ("", "null", "None", "N/A", "n/a")
 
 
+# ---------------------------------------------------------------------------
+# Core Evaluation Engine (Plan §2.2, §3.2, §3.4)
+# ---------------------------------------------------------------------------
+
 def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
     """
-    Evaluate declarations with five possible outcomes.
-
-    Phase 2 keeps COMPLIANCE_FIELDS as the detection catalog, but the outcome is
-    now confidence-gated: low confidence always becomes ManualReviewRequired,
-    never a guessed Pass or Fail.
+    Evaluate declarations with five possible outcomes:
+      - Pass
+      - Fail
+      - ManualReviewRequired
+      - NotApplicable
+      - Relaxed
     """
     ocr_text = scan_context.get("ocr_text") or scan_context.get("raw_ocr_text") or ""
     normalized_text = _normalize(ocr_text)
@@ -275,8 +340,161 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
     overall_confidence = scan_context.get("overall_confidence", scan_context.get("ocr_confidence"))
     low_confidence = bool(scan_context.get("low_confidence") or scan_context.get("low_confidence_ocr"))
 
+    db: Optional[Session] = scan_context.get("db")
+    eval_date = scan_context.get("evaluation_date") or scan_context.get("evaluated_at") or date.today()
+    if isinstance(eval_date, datetime):
+        eval_date = eval_date.date()
+
+    manufacturer_id = scan_context.get("manufacturer_id")
+    product_id = scan_context.get("product_id")
+
+    # Resolve CommodityCategory
+    category_input = scan_context.get("commodity_category") or scan_context.get("category_obj") or scan_context.get("category")
+    category_obj: Optional[CommodityCategory] = None
+    if isinstance(category_input, CommodityCategory):
+        category_obj = category_input
+    elif db and isinstance(category_input, str):
+        category_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike(category_input.strip())).first()
+    elif db and isinstance(category_input, int):
+        category_obj = db.query(CommodityCategory).filter(CommodityCategory.id == category_input).first()
+
+    # Determine active rules
+    active_rules: Optional[List[Rule]] = scan_context.get("active_rules")
+    if active_rules is None and db:
+        active_rules = get_active_rules(category=category_obj or category_input, evaluation_date=eval_date, db=db)
+
     checks: list[ComplianceCheckResult] = []
     now = datetime.utcnow()
+
+    # If active_rules are available from DB or context, evaluate per Rule row
+    if active_rules:
+        for rule in active_rules:
+            key = rule.rule_family or rule.code
+            rule_id = rule.id
+            check_type = rule.check_type
+            if hasattr(check_type, "value"):
+                check_type = check_type.value
+
+            confidence = _field_confidence(key, field_confidences, overall_confidence)
+            value = extracted_fields.get(key)
+            extracted_value = str(value).strip() if _has_extracted_value(value) else _extract_value(key, normalized_text)
+            relaxation_order_id = None
+            notes = None
+
+            # ── CheckType: FontSize ──────────────────────────────────────────
+            if check_type == "FontSize":
+                # Check for category exemption (e.g. Medical Device)
+                if category_obj and category_obj.font_rule_exempted:
+                    result = "NotApplicable"
+                    notes = "Excluded — governed by Medical Devices Rules, 2017"
+                else:
+                    calibration = scan_context.get("calibration") or {}
+                    cal_method = calibration.get("method")
+                    if not cal_method or cal_method == "unverified":
+                        result = "ManualReviewRequired"
+                        notes = "Unverified calibration: physical font size cannot be determined reliably."
+                    else:
+                        mm_per_px_y = calibration.get("mm_per_px_y") or 0.1
+                        bboxes = scan_context.get("bounding_boxes") or []
+                        font_pass = True
+                        if bboxes:
+                            for b in bboxes:
+                                h_px = b.get("bbox", [0, 0, 0, 0])[3] if isinstance(b.get("bbox"), list) and len(b.get("bbox")) >= 4 else 0
+                                h_mm = h_px * mm_per_px_y
+                                if h_mm < 1.0:
+                                    font_pass = False
+                                    break
+                        if font_pass:
+                            result = "Pass"
+                        else:
+                            result = "Fail"
+                            notes = "Font size below minimum prescribed height under Rule 7."
+
+            # ── CheckType: StandardSize ──────────────────────────────────────
+            elif check_type == "StandardSize":
+                net_qty_val = str(extracted_fields.get("net_quantity") or _extract_value("net_quantity", normalized_text) or "").lower().strip()
+                if not net_qty_val:
+                    if low_confidence:
+                        result = "ManualReviewRequired"
+                        notes = "Could not extract net quantity to verify standard size."
+                    else:
+                        result = "Fail"
+                        notes = "Net quantity declaration missing for standard size verification."
+                else:
+                    match = re.search(r"(\d+(?:\.\d+)?)\s*(g|gm|gms|gram|grams|kg|kgs|kilogram|ml|millilitre|l|litre|litres)", net_qty_val)
+                    if match:
+                        num = float(match.group(1))
+                        unit = match.group(2)
+                        if unit in ("kg", "kgs", "kilogram", "l", "litre", "litres"):
+                            size = num * 1000
+                        else:
+                            size = num
+                        STANDARD_SIZES = {25, 50, 100, 200, 250, 400, 500, 750, 1000, 1500, 2000, 5000, 15000}
+                        if size in STANDARD_SIZES or (size >= 1000 and size % 500 == 0):
+                            result = "Pass"
+                        else:
+                            result = "Fail"
+                            notes = f"Pack size '{net_qty_val}' is not a prescribed standard size under the Second Schedule / Fifth Schedule."
+                    else:
+                        result = "Pass"
+
+            # ── CheckType: Symbol ────────────────────────────────────────────
+            elif check_type == "Symbol":
+                symbols = scan_context.get("symbols") or {}
+                if key == "veg_non_veg_symbol":
+                    if symbols.get("veg_dot") or symbols.get("non_veg_dot"):
+                        result = "Pass"
+                    else:
+                        result = "Fail"
+                        notes = "Mandatory veg / non-veg symbol not detected."
+                else:
+                    result = "Pass"
+
+            # ── CheckType: Presence / Format / Generic ──────────────────────
+            else:
+                field_def = COMPLIANCE_FIELD_MAP.get(key, {"patterns": [], "auto_detect": False})
+                text_present = _check_field(field_def, normalized_text)
+                present = _has_extracted_value(extracted_value) or text_present
+
+                if low_confidence or confidence is None or confidence < FIELD_CONFIDENCE_THRESHOLD:
+                    result = "ManualReviewRequired"
+                    notes = "Extraction confidence below threshold; officer review required."
+                elif present:
+                    result = "Pass"
+                else:
+                    result = "Fail"
+
+            # ── Relaxation Order Hook (Plan §3.2 point 6) ───────────────────
+            if result == "Fail" and db and manufacturer_id and rule_id:
+                order = db.query(RelaxationOrder).filter(
+                    RelaxationOrder.rule_id == rule_id,
+                    RelaxationOrder.manufacturer_id == manufacturer_id,
+                    or_(RelaxationOrder.product_id == None, RelaxationOrder.product_id == product_id),
+                    RelaxationOrder.is_active == True,
+                    RelaxationOrder.valid_from <= eval_date,
+                    RelaxationOrder.valid_until >= eval_date,
+                ).first()
+                if order:
+                    result = "Relaxed"
+                    relaxation_order_id = order.id
+                    notes = f"Relaxed under order {order.order_number}"
+
+            checks.append(
+                ComplianceCheckResult(
+                    field_key=key,
+                    result=result,
+                    confidence=confidence,
+                    extracted_value=extracted_value,
+                    rule_id=rule_id,
+                    relaxation_order_id=relaxation_order_id,
+                    notes=notes,
+                    evaluated_at=now,
+                )
+            )
+
+        return checks
+
+    # Fallback to COMPLIANCE_FIELDS catalog (for purely in-memory unit tests)
     for field in COMPLIANCE_FIELDS:
         key = field["key"]
         confidence = _field_confidence(key, field_confidences, overall_confidence)
@@ -347,17 +565,17 @@ def _legacy_summary_from_checks(checks: Sequence[ComplianceCheckResult]) -> dict
         if _has_extracted_value(check.extracted_value)
     }
     missing_fields = [
-        field["label"]
-        for field in COMPLIANCE_FIELDS
-        if field["required"] and not field_results.get(field["key"], False)
+        COMPLIANCE_FIELD_MAP.get(check.field_key, {}).get("label", check.field_key)
+        for check in checks
+        if check.result == "Fail"
     ]
 
     mandatory_fields_present = sum(
-        1 for field in COMPLIANCE_FIELDS
-        if field["required"] and field_results.get(field["key"], False)
+        1 for check in checks
+        if check.result in ("Pass", "Relaxed")
     )
-    total_mandatory_fields = sum(1 for field in COMPLIANCE_FIELDS if field["required"])
-    compliance_score = round((mandatory_fields_present / total_mandatory_fields) * 100, 1)
+    total_mandatory_fields = len(checks)
+    compliance_score = round((mandatory_fields_present / total_mandatory_fields * 100), 1) if total_mandatory_fields else 100.0
     summary = summarize_checks(checks)
 
     if summary["headline"] == "NeedsManualReview":
@@ -388,15 +606,7 @@ def _legacy_summary_from_checks(checks: Sequence[ComplianceCheckResult]) -> dict
 
 def check_compliance(ocr_text: str, category: str = "general") -> dict:
     """
-    Run the full compliance check against the extracted OCR text.
-
-    Args:
-        ocr_text: Raw text from Tesseract OCR
-        category: Product category (food, cosmetic, textile, general)
-
-    Returns:
-        A dict with compliance result, score, field results, missing fields,
-        extracted values, and remarks.
+    Run compliance check against extracted OCR text.
     """
     checks = evaluate_declarations({
         "ocr_text": ocr_text,

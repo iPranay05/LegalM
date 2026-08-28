@@ -32,4 +32,10 @@ else:
     print("  Email:    admin@lm.gov.in")
     print("  Password: admin1234")
 
+from app.services.seed_data import seed_rules
+
+# Seed rules and categories
+seed_rules(db)
+print("Seeded commodity categories and versioned rules successfully.")
+
 db.close()

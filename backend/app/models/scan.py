@@ -12,12 +12,12 @@ class Scan(Base):
 
     # Inspector who performed the scan
     inspector_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    inspector = relationship("User", back_populates="scans")
 
-    # Product details (extracted by OCR)
+    # Product details (extracted by OCR or linked)
     product_name = Column(String, nullable=True)
     brand_name = Column(String, nullable=True)
-    category = Column(String, nullable=True)  # food, cosmetic, textile, etc.
+    category = Column(String, nullable=True)  # food, cosmetic, textile, etc. (legacy string)
+    commodity_category_id = Column(Integer, ForeignKey("commodity_categories.id"), nullable=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
 
     # Location context
@@ -36,7 +36,6 @@ class Scan(Base):
     image_paths = Column(JSON, nullable=True)            # all uploaded images
 
     # Bounding box annotations per field (for review UI)
-    # [{"field": "mrp", "bbox": [x,y,w,h], "text": "₹45", "confidence": 0.87, "confirmed": false}]
     bounding_boxes = Column(JSON, nullable=True)
 
     # Pipeline status: pending | processing | review_needed | complete | failed
@@ -51,10 +50,9 @@ class Scan(Base):
 
     # Barcode / QR code detection
     barcode_data = Column(JSON, nullable=True)
-    # {"barcodes": [...], "primary_barcode": "8901234...", "product_info": {...}, "decoded": true}
 
     # Pipeline intelligence flags
-    groq_used = Column(Boolean, default=False)  # True when Groq LLM enriched the extracted fields
+    groq_used = Column(Boolean, default=False)
 
     # Compliance result
     is_compliant = Column(Boolean, nullable=True)
@@ -64,7 +62,7 @@ class Scan(Base):
     field_results = Column(JSON, nullable=True)
 
     # Missing fields list
-    missing_fields = Column(JSON, nullable=True)  # list of strings
+    missing_fields = Column(JSON, nullable=True)
 
     # Extracted field values
     extracted_fields = Column(JSON, nullable=True)
@@ -82,6 +80,8 @@ class Scan(Base):
 
     # Relationships
     inspector = relationship("User", back_populates="scans", foreign_keys=[inspector_id])
+    commodity_category = relationship("CommodityCategory", back_populates="scans")
+    product = relationship("Product", foreign_keys=[product_id])
     manual_findings = relationship("ManualFinding", back_populates="scan")
     reviewed_by = relationship("User", foreign_keys=[reviewed_by_id])
     compliance_checks = relationship("ComplianceCheck", back_populates="scan")

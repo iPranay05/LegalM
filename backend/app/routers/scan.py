@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import datetime
 from app.database import get_db
+from app.models.commodity_category import CommodityCategory
 from app.models.scan import Scan, ManualFinding
 from app.models.rules import ComplianceCheck, ComplianceCheckResult as ComplianceCheckResultEnum
 from app.models.product import Product
@@ -23,7 +24,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 # ── Product auto-linking ───────────────────────────────────────────────────────
 
-def _upsert_product(db: Session, product_name: str, category: str, scan: Scan) -> Optional[Product]:
+def _upsert_product(db: Session, product_name: Optional[str], category: str, scan: Scan) -> Optional[Product]:
     """
     After every scan, find-or-create a Product record by name+category.
     Updates its latest compliance stats and links scan.product_id.
@@ -32,9 +33,12 @@ def _upsert_product(db: Session, product_name: str, category: str, scan: Scan) -
     if not product_name:
         return None
 
+    cat_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike(category.strip())).first() if category else None
+    cat_id = cat_obj.id if cat_obj else None
+
     product = db.query(Product).filter(
         Product.name.ilike(product_name),
-        Product.category == (category or "general"),
+        (Product.commodity_category_id == cat_id) | (Product.category == (category or "general")),
         Product.is_active == True,
     ).first()
 
@@ -42,6 +46,7 @@ def _upsert_product(db: Session, product_name: str, category: str, scan: Scan) -
         product = Product(
             name=product_name,
             category=category or "general",
+            commodity_category_id=cat_id,
             brand_name=scan.brand_name,
             is_compliant=scan.is_compliant,
             last_compliance_score=scan.compliance_score,
@@ -53,6 +58,8 @@ def _upsert_product(db: Session, product_name: str, category: str, scan: Scan) -
         product.last_compliance_score = scan.compliance_score
         product.last_scan_id = scan.scan_id
         product.is_compliant = scan.is_compliant
+        if cat_id and not product.commodity_category_id:
+            product.commodity_category_id = cat_id
 
     scan.product_id = product.id
     return product
@@ -238,12 +245,16 @@ async def upload_and_scan(
                      if len(l.strip()) > 3 and l.strip().replace(" ", "").isascii()]
             product_name = lines[0][:60] if lines else None
 
+    cat_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike(category.strip())).first() if category else None
+    cat_id = cat_obj.id if cat_obj else None
+
     scan = Scan(
         scan_id=scan_id,
         inspector_id=current_user.id if current_user else None,
         product_name=product_name,
         brand_name=brand_name,
         category=category,
+        commodity_category_id=cat_id,
         shop_name=shop_name,
         location=location,
         state=state,
@@ -356,12 +367,16 @@ async def upload_multi_and_scan(
                      if len(l.strip()) > 3 and l.strip().replace(" ", "").isascii()]
             product_name = lines[0][:60] if lines else None
 
+    cat_obj = db.query(CommodityCategory).filter(CommodityCategory.name.ilike(category.strip())).first() if category else None
+    cat_id = cat_obj.id if cat_obj else None
+
     scan = Scan(
         scan_id=scan_id,
         inspector_id=current_user.id if current_user else None,
         product_name=product_name,
         brand_name=brand_name,
         category=category,
+        commodity_category_id=cat_id,
         shop_name=shop_name,
         location=location,
         state=state,
