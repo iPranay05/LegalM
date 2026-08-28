@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "LM Compliance",
+    "slug": "lm-compliance",
+    "version": "1.0.0",
+    "sdkVersion": "54.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "in.gov.lmcompliance"
+    },
+    "android": {
+      "package": "in.gov.lmcompliance",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow LM Compliance to use the camera to scan product labels."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow LM Compliance to access your photos to upload product labels."
+        }
+      ]
+    ],
+    "scheme": "lmcompliance",
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

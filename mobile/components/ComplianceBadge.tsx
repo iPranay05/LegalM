@@ -1,0 +1,59 @@
+import React from "react";
+import { View, Text, StyleSheet } from "react-native";
+import { Colors } from "./Colors";
+
+interface Props {
+  isCompliant: boolean;
+  score: number;
+  size?: "sm" | "lg";
+}
+
+export default function ComplianceBadge({ isCompliant, score, size = "sm" }: Props) {
+  const isLarge = size === "lg";
+
+  return (
+    <View style={[styles.container, isLarge && styles.containerLarge,
+      isCompliant ? styles.pass : styles.fail]}>
+      <Text style={[styles.icon, isLarge && styles.iconLarge]}>
+        {isCompliant ? "✓" : "✗"}
+      </Text>
+      <View>
+        <Text style={[styles.status, isLarge && styles.statusLarge,
+          isCompliant ? styles.passText : styles.failText]}>
+          {isCompliant ? "COMPLIANT" : "NON-COMPLIANT"}
+        </Text>
+        <Text style={[styles.score, isLarge && styles.scoreLarge,
+          isCompliant ? styles.passText : styles.failText]}>
+          Score: {score.toFixed(1)}%
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    gap: 8,
+  },
+  containerLarge: {
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 12,
+    gap: 12,
+  },
+  pass: { backgroundColor: Colors.successLight },
+  fail: { backgroundColor: Colors.dangerLight },
+  icon: { fontSize: 16, fontWeight: "bold" },
+  iconLarge: { fontSize: 28 },
+  status: { fontSize: 11, fontWeight: "700", letterSpacing: 0.5 },
+  statusLarge: { fontSize: 16, letterSpacing: 0.8 },
+  score: { fontSize: 10, fontWeight: "500" },
+  scoreLarge: { fontSize: 13 },
+  passText: { color: Colors.success },
+  failText: { color: Colors.danger },
+});

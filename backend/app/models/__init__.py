@@ -1,0 +1,8 @@
+# Import all models here so SQLAlchemy registers them before create_all()
+from app.models.user import User  # noqa
+from app.models.scan import Scan, ManualFinding  # noqa
+from app.models.manufacturer import Manufacturer  # noqa
+from app.models.product import Product  # noqa
+from app.models.rules import Rule, RelaxationOrder  # noqa
+from app.models.report import Report  # noqa
+from app.models.ecommerce import EcommerceCheck  # noqa
