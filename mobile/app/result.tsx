@@ -349,14 +349,14 @@ export default function ResultScreen() {
           <View style={styles.evidenceCard}>
             <Text style={styles.sectionLabel}>Declaration Evidence & Localization</Text>
             <View style={{ gap: 8, marginTop: 8 }}>
-              {result.bounding_boxes.map((b) => {
+                {result.bounding_boxes.map((b, index) => {
                 const conf = b.confidence != null ? (b.confidence > 1 ? b.confidence / 100 : b.confidence) : 0;
                 const isVision = (b as any).bbox_source === "vision_estimate" || (b.bbox && typeof b.bbox === "object" && (b.bbox as any).bbox_source === "vision_estimate");
                 const color = conf >= 0.7 ? Colors.success : (conf >= 0.4 ? Colors.warning : Colors.danger);
                 const sourceBadge = isVision ? "Vision Estimate" : "OCR Word Match";
 
                 return (
-                  <View key={b.field} style={[styles.evidenceRow, { borderLeftColor: color, borderLeftWidth: 4 }]}>
+                  <View key={`${b.field}-${b.image_index ?? 0}-${index}`} style={[styles.evidenceRow, { borderLeftColor: color, borderLeftWidth: 4 }]}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.evidenceField}>{b.field.replace(/_/g, " ").toUpperCase()}</Text>
                       {b.text ? <Text style={styles.evidenceText} numberOfLines={2}>"{b.text}"</Text> : null}
@@ -409,9 +409,9 @@ export default function ResultScreen() {
           {/* Tab: All Rules */}
           {activeTab === "all" && !loadingTabs && (
             <View>
-              {allRules.map((row) => (
+              {allRules.map((row, index) => (
                 <FieldRow
-                  key={row.key}
+                  key={`${row.key}-${index}`}
                   label={row.label}
                   present={row.present}
                   extractedValue={row.extracted_value}
@@ -436,8 +436,8 @@ export default function ResultScreen() {
                   </Text>
                   <Text style={styles.violationHeaderSub}>Offence under the Legal Metrology Act, 2009</Text>
                 </View>
-                {violations.map((row) => (
-                  <View key={row.key} style={styles.violationRow}>
+              {violations.map((row, index) => (
+                  <View key={`${row.key}-${index}`} style={styles.violationRow}>
                     <View style={styles.violationDot} />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.violationLabel}>{row.label}</Text>
@@ -458,8 +458,8 @@ export default function ResultScreen() {
               </View>
             ) : (
               <View>
-                {relaxed.map((row) => (
-                  <View key={row.key} style={styles.relaxedRow}>
+              {relaxed.map((row, index) => (
+                  <View key={`${row.key}-${index}`} style={styles.relaxedRow}>
                     <Text style={styles.relaxedLabel}>{row.label}</Text>
                     <Text style={styles.relaxedNote}>Not present · Optional</Text>
                   </View>

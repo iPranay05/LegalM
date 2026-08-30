@@ -152,6 +152,7 @@ class ScanOut(BaseModel):
     bounding_boxes: Optional[List[dict]]
     pipeline_status: Optional[str]
     calibration_method: Optional[str]
+    calibration_data: Optional[dict]
     symbols_detected: Optional[dict]
     barcode_data: Optional[dict]
     is_compliant: Optional[bool]
@@ -176,6 +177,32 @@ class ScanStatusOut(BaseModel):
     review_status: Optional[str] = "pending"
     class Config:
         from_attributes = True
+
+
+@router.post("/{scan_id}/reprocess", response_model=ScanStatusOut)
+def reprocess_scan(
+    scan_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("Inspector", "Controller", "ManufacturerSelfCheck")),
+):
+    """Re-run an existing scan with the current perception pipeline."""
+    scan = scope_scans_for_user(db.query(Scan), current_user, db).filter(Scan.scan_id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    paths = scan.image_paths or ([scan.image_path] if scan.image_path else [])
+    if not paths or not all(os.path.exists(path) for path in paths):
+        raise HTTPException(status_code=409, detail="Original scan image is no longer available")
+    scan.pipeline_status = "pending"
+    scan.review_status = "pending"
+    db.commit()
+    from app.services.pipeline_service import run_pipeline_task
+    try:
+        run_pipeline_task.delay(scan.scan_id, paths if len(paths) > 1 else paths[0], scan.category or "general")
+    except Exception:
+        scan.pipeline_status = "failed"
+        db.commit()
+        raise HTTPException(status_code=503, detail="Perception pipeline unavailable")
+    return scan
 
 
 class ScanResultFourTab(BaseModel):
@@ -413,9 +440,9 @@ def get_scan_result_tabs(
 
     for field_def in COMPLIANCE_FIELDS:
         key = field_def["key"]
-        present = field_results.get(key, False)
         check = check_by_field.get(key)
         result = check.result.value if check and hasattr(check.result, "value") else (str(check.result) if check else None)
+        present = field_results.get(key, False) or result in ("Pass", "Relaxed", "NotApplicable")
         entry = {
             "key": key,
             "label": field_def["label"],
@@ -428,7 +455,7 @@ def get_scan_result_tabs(
             "notes": check.notes if check else None,
         }
         all_rules.append(entry)
-        if result == "ManualReviewRequired":
+        if result in ("ManualReviewRequired", "NotApplicable"):
             continue
         if not present:
             if field_def["required"]:

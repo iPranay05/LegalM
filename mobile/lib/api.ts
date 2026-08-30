@@ -18,4 +18,17 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
+// A token signed with an old SECRET_KEY (or an expired token) must not be
+// retried forever. Clear it so the app's next launch sends the user to login.
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    if (error?.response?.status === 401) {
+      await SecureStore.deleteItemAsync("auth_token");
+      await SecureStore.deleteItemAsync("auth_user");
+    }
+    return Promise.reject(error);
+  },
+);
+
 export default api;

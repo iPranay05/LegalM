@@ -261,7 +261,12 @@ def get_active_rules(
     )
 
     if cat_id is not None:
-        q = q.filter(or_(Rule.commodity_category_id == None, Rule.commodity_category_id == cat_id))
+        # FSSAI licence detection is always performed when visible, even if a
+        # user selected General; category controls whether it is mandatory,
+        # not whether the vision/OCR extractor is allowed to look for it.
+        q = q.filter(or_(Rule.commodity_category_id == None,
+                         Rule.commodity_category_id == cat_id,
+                         Rule.rule_family == "fssai_number"))
     else:
         q = q.filter(Rule.commodity_category_id == None)
 
@@ -394,6 +399,15 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
             relaxation_order_id = None
             notes = None
             bbox = field_bboxes.get(key)
+
+            if key == "fssai_number" and category_obj and not category_obj.is_food:
+                checks.append(ComplianceCheckResult(
+                    field_key=key, result="NotApplicable", confidence=confidence,
+                    extracted_value=extracted_value, rule_id=rule_id,
+                    notes="Detected when visible, but not mandatory for this category.",
+                    image_index=image_index, bounding_box=bbox,
+                ))
+                continue
 
             # ── CheckType: FontSize ──────────────────────────────────────────
             if check_type == "FontSize":
@@ -606,7 +620,10 @@ def _legacy_summary_from_checks(checks: Sequence[ComplianceCheckResult]) -> dict
         1 for check in checks
         if check.result in ("Pass", "Relaxed")
     )
-    total_mandatory_fields = len(checks)
+    # NotApplicable rules (for example FSSAI on a non-food scan) must not
+    # dilute the score denominator. Manual review remains unresolved and is
+    # intentionally counted, preserving the prior 8/9 = 88.9% behaviour.
+    total_mandatory_fields = sum(1 for check in checks if check.result != "NotApplicable")
     compliance_score = round((mandatory_fields_present / total_mandatory_fields * 100), 1) if total_mandatory_fields else 100.0
     summary = summarize_checks(checks)
 

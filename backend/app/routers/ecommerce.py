@@ -11,6 +11,7 @@ from app.models.ecommerce import EcommerceCheck
 from app.models.user import User
 from app.routers.deps import get_current_user
 from app.config import settings
+from app.services.ecommerce_crawler import fetch_listing, evaluate_listing_text
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/ecommerce", tags=["E-Commerce Checker"])
@@ -76,6 +77,30 @@ async def submit_ecommerce_check(
     db.add(check)
     db.commit()
     db.refresh(check)
+    return check
+
+
+@router.post("/crawl", response_model=EcommerceCheckOut, status_code=201)
+async def crawl_ecommerce_listing(
+    url: str = Form(...),
+    platform_name: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fetch a public listing for evidence; never infers compliance from fetch success."""
+    result = fetch_listing(url)
+    evaluation = None
+    if result.get("status") == "fetched":
+        try:
+            evaluation = evaluate_listing_text(result.get("text", ""))
+        except Exception as exc:
+            result["evaluation_error"] = type(exc).__name__
+    note = {"crawler": result, "evaluation": evaluation}
+    check = EcommerceCheck(check_id=str(uuid.uuid4()), platform_name=platform_name,
+                           url=url, officer_notes=__import__("json").dumps(note),
+                           is_compliant=(evaluation or {}).get("summary", {}).get("headline") == "AllPass" if evaluation else None,
+                           checked_by_id=current_user.id)
+    db.add(check); db.commit(); db.refresh(check)
     return check
 
 

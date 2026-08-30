@@ -35,6 +35,7 @@ _FIELDS_SCHEMA = """{
   "fssai_number": {"value": "FSSAI licence number, exactly 14 digits", "confidence": 0.0, "bbox": [0.1, 0.8, 0.6, 0.88]},
   "consumer_care": {"value": "Consumer care phone number or email", "confidence": 0.0, "bbox": [0.1, 0.85, 0.9, 0.95]},
   "country_of_origin": {"value": "Country of origin (for imported products only)", "confidence": 0.0, "bbox": [0.5, 0.85, 0.9, 0.95]}
+  ,"barcode_number": {"value": "Human-readable barcode digits, digits only", "confidence": 0.0, "bbox": [0.1, 0.85, 0.9, 0.99]}
 }"""
 
 _RULES = """Rules:
@@ -48,6 +49,7 @@ _RULES = """Rules:
 - confidence must be a number from 0.0 to 1.0 based only on visual certainty
 - If a field is unclear, partially obscured, or guessed, set value to null or confidence below 0.6
 - For Hindi/Devanagari text, transliterate to English
+- If a barcode is visible, read the printed digits below it into barcode_number; do not guess or infer missing digits.
 - Output raw JSON only — no markdown fences, no code blocks, no explanation text"""
 
 IMAGE_PROMPT = f"""You are an expert at reading Indian packaged commodity labels under the Legal Metrology (Packaged Commodities) Rules, 2011.

@@ -121,7 +121,14 @@ export default function ScanScreen() {
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       router.push({ pathname: "/result", params: { scan_id: res.data.scan_id, data: JSON.stringify(res.data) } });
     } catch (err: any) {
-      Alert.alert("Error", err?.response?.data?.detail || err?.message || "Scan failed. Try again.");
+      const detail = err?.response?.data?.detail;
+      if (err?.response?.status === 401) {
+        Alert.alert("Session expired", "Please log in again before submitting a scan.", [
+          { text: "OK", onPress: () => router.replace("/(auth)/login") },
+        ]);
+      } else {
+        Alert.alert("Error", detail || err?.message || "Scan failed. Try again.");
+      }
     } finally {
       setLoading(false);
     }

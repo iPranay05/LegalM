@@ -18,6 +18,7 @@ export interface ComplianceResult {
   bounding_boxes?: BoundingBox[];
   symbols_detected?: SymbolResult;
   calibration_method?: string;
+  calibration_data?: Record<string, unknown>;
   // Barcode + Groq
   groq_used?: boolean;
   barcode_data?: BarcodeData;
@@ -44,6 +45,7 @@ export interface SymbolResult {
   gm_mark: boolean;
   veg_confidence?: number;
   non_veg_confidence?: number;
+  tamper_detection?: { status: string; signals?: string[]; confidence?: number };
 }
 
 export interface ManualFinding {

@@ -58,12 +58,17 @@ def run_calibration_stage(image_bytes: bytes,
     """Run calibration: auto first, then inspector input, then unverified."""
     from app.services.calibration_service import (
         calibrate_from_image,
+        calibrate_from_barcode,
         calibrate_from_inspector_input,
     )
     # Try automatic
     cal = calibrate_from_image(image_bytes)
     if cal["method"] != "unverified":
         return cal
+
+    barcode_cal = calibrate_from_barcode(image_bytes)
+    if barcode_cal:
+        return barcode_cal
 
     # Try inspector input
     if inspector_width_mm and img_width_px:
@@ -126,6 +131,15 @@ def run_pipeline_sync(image_bytes: bytes,
     field_confidences = ocr.get("field_confidences") or {}
     field_bboxes = ocr.get("field_bboxes") or {}
 
+    # Vision can recover the human-readable barcode digits when perspective or
+    # blur prevents pyzbar from decoding the bars.
+    if not barcode_result or not barcode_result.get("decoded"):
+        candidate = str(extracted_fields.get("barcode_number") or "")
+        digits = "".join(ch for ch in candidate if ch.isdigit())
+        if 8 <= len(digits) <= 14:
+            barcode_result = {"barcodes": [{"type": "OCR_BARCODE", "data": digits, "source": "groq_vision"}],
+                              "primary_barcode": digits, "product_info": {}, "decoded": True}
+
     # The rule catalog evaluates one declaration, while vision returns the
     # name and address as two precise fields. Preserve both and also expose the
     # combined rule field so manufacturer declarations can pass correctly.
@@ -148,6 +162,8 @@ def run_pipeline_sync(image_bytes: bytes,
         img_height_px=img_height_px,
     )
     symbols = run_symbol_stage(image_bytes, raw_text, category)
+    from app.services.tamper_service import detect_tamper
+    symbols["tamper_detection"] = detect_tamper(image_bytes, field_bboxes)
 
     # Merge barcode metadata into extracted fields if OCR missed them
     if barcode_product:

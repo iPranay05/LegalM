@@ -11,6 +11,7 @@ Graceful fallback at every step:
 import io
 import logging
 import re
+import pytesseract
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,43 @@ def decode_barcodes(image_bytes: bytes) -> list[dict]:
                 upscaled = cv2.resize(gray, (int(w * scale), int(h * scale)),
                                       interpolation=cv2.INTER_CUBIC)
                 _decode_arr(upscaled)
+
+            # Phone photos often contain a small barcode occupying only a
+            # narrow panel. Decode overlapping tiles at higher resolution so
+            # the quiet zones and bars are not lost in the full image scale.
+            for y0, y1 in ((0, 0.55), (0.35, 1.0), (0.55, 1.0)):
+                crop = gray[int(h * y0):int(h * y1), :]
+                if crop.size == 0:
+                    continue
+                factor = max(2.0, 1600 / max(crop.shape))
+                enlarged = cv2.resize(crop, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
+                enlarged = cv2.detailEnhance(cv2.cvtColor(enlarged, cv2.COLOR_GRAY2BGR), sigma_s=10, sigma_r=0.15)
+                _decode_arr(cv2.cvtColor(enlarged, cv2.COLOR_BGR2GRAY))
+                _decode_arr(cv2.threshold(cv2.cvtColor(enlarged, cv2.COLOR_BGR2GRAY), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1])
+
+            # Handle portrait/landscape orientation and modest camera tilt.
+            for angle in (90, 270):
+                rotated = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE if angle == 90 else cv2.ROTATE_90_COUNTERCLOCKWISE)
+                _decode_arr(rotated)
+
+        # Last-resort recovery for photographed barcodes: read the printed
+        # human-readable digits below the bars. Keep this explicitly marked as
+        # OCR-derived so consumers can distinguish it from decoded bars.
+        if not results:
+            from PIL import Image
+            import numpy as np
+            pil = Image.open(io.BytesIO(image_bytes)).convert("L")
+            w, h = pil.size
+            for start in (0.72, 0.82):
+                crop = pil.crop((0, int(h * start), w, h)).resize((w * 5, int(h * (1 - start)) * 5))
+                for psm in (7, 11, 13):
+                    text = pytesseract.image_to_string(crop, config=f"--psm {psm} -c tessedit_char_whitelist=0123456789")
+                    digits = re.sub(r"\D", "", text)
+                    if 8 <= len(digits) <= 14:
+                        results.append({"type": "EAN13" if len(digits) == 13 else "OCR_BARCODE", "data": digits, "source": "ocr"})
+                        break
+                if results:
+                    break
 
         return results
 

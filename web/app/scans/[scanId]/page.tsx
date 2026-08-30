@@ -377,6 +377,7 @@ export default function ScanDetailPage() {
               {scan.calibration_method && (
                 <span className="text-[10px] text-gray-400 font-semibold">
                   Calibration: {scan.calibration_method}
+                  {scan.calibration_method === "barcode_reference" && " (barcode reference estimate)"}
                 </span>
               )}
             </div>
@@ -446,6 +447,15 @@ export default function ScanDetailPage() {
                     ⚗️ GM Mark: {scan.symbols_detected.gm_mark ? "Detected" : "Not Found"}
                   </span>
                 </div>
+                {scan.symbols_detected.tamper_detection && (
+                  <p className="mt-2 text-xs text-amber-700">
+                    Tamper/sticker signal: {scan.symbols_detected.tamper_detection.status === "suspected"
+                      ? "possible MRP sticker inconsistency; manual verification required"
+                      : scan.symbols_detected.tamper_detection.status === "unavailable"
+                        ? "unavailable for this image"
+                        : "no suspected MRP sticker signal"}
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -497,6 +507,8 @@ export default function ScanDetailPage() {
                       <td className="table-td">
                         {row.result === "ManualReviewRequired"
                           ? <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-100 px-2 py-1 text-[10px] font-semibold text-amber-800">⚠ Manual Review</span>
+                          : row.result === "NotApplicable"
+                          ? <span className="inline-flex items-center rounded-full border border-gray-300 bg-gray-100 px-2 py-1 text-[10px] font-semibold text-gray-600">— Not Applicable</span>
                           : row.present
                           ? <span className="badge-pass text-[10px]">✓ Found</span>
                           : <span className="badge-fail text-[10px]">✗ Missing</span>}

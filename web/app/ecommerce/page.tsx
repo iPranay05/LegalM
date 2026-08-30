@@ -16,6 +16,7 @@ export default function EcommercePage() {
   const [filterCompliant, setFilterCompliant] = useState("");
   const [selectedCheck, setSelectedCheck] = useState<EcommerceCheck | null>(null);
   const [error, setError] = useState("");
+  const [useCrawler, setUseCrawler] = useState(true);
 
   const [form, setForm] = useState({
     url: "",
@@ -51,13 +52,13 @@ export default function EcommercePage() {
       const fd = new FormData();
       fd.append("url", form.url);
       if (form.platform_name) fd.append("platform_name", form.platform_name);
-      if (form.has_country_of_origin_filter !== "")
+      if (!useCrawler && form.has_country_of_origin_filter !== "")
         fd.append("has_country_of_origin_filter", form.has_country_of_origin_filter);
-      if (form.officer_notes) fd.append("officer_notes", form.officer_notes);
-      if (fileRef.current?.files?.[0])
+      if (!useCrawler && form.officer_notes) fd.append("officer_notes", form.officer_notes);
+      if (!useCrawler && fileRef.current?.files?.[0])
         fd.append("evidence_screenshot", fileRef.current.files[0]);
 
-      await api.post("/ecommerce/check", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      await api.post(useCrawler ? "/ecommerce/crawl" : "/ecommerce/check", fd, { headers: { "Content-Type": "multipart/form-data" } });
       setShowForm(false);
       setForm({ url: "", platform_name: "", has_country_of_origin_filter: "", officer_notes: "" });
       if (fileRef.current) fileRef.current.value = "";
@@ -114,6 +115,10 @@ export default function EcommercePage() {
             <strong>FR-18:</strong> E-commerce entities must display country-of-origin filter on their platforms.
             Submit the URL and your manual judgment about whether the filter is present.
           </p>
+          <div className="mb-4 flex gap-2">
+            <button type="button" onClick={() => setUseCrawler(true)} className={`px-3 py-2 rounded-lg text-sm font-semibold ${useCrawler ? "bg-gov-navy text-white" : "bg-gray-100 text-gray-600"}`}>Fetch & evaluate automatically</button>
+            <button type="button" onClick={() => setUseCrawler(false)} className={`px-3 py-2 rounded-lg text-sm font-semibold ${!useCrawler ? "bg-gov-navy text-white" : "bg-gray-100 text-gray-600"}`}>Record manual judgment</button>
+          </div>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div className="col-span-2">
@@ -132,7 +137,7 @@ export default function EcommercePage() {
                   className="form-input" placeholder="e.g. Amazon, Flipkart, Meesho"
                 />
               </div>
-              <div>
+              {!useCrawler && <div>
                 <label className="form-label">Country-of-Origin Filter Present?</label>
                 <select
                   value={form.has_country_of_origin_filter}
@@ -143,8 +148,8 @@ export default function EcommercePage() {
                   <option value="true">✓ Yes — Filter is present</option>
                   <option value="false">✗ No — Filter is absent (non-compliant)</option>
                 </select>
-              </div>
-              <div className="col-span-2">
+              </div>}
+              {!useCrawler && <div className="col-span-2">
                 <label className="form-label">Officer Notes</label>
                 <textarea
                   value={form.officer_notes}
@@ -152,18 +157,18 @@ export default function EcommercePage() {
                   className="form-input" rows={3}
                   placeholder="Describe what you observed on the platform listing page…"
                 />
-              </div>
-              <div className="col-span-2">
+              </div>}
+              {!useCrawler && <div className="col-span-2">
                 <label className="form-label">Evidence Screenshot (optional)</label>
                 <input
                   ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp"
                   className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-gov-navy file:text-white hover:file:bg-gov-dark"
                 />
-              </div>
+              </div>}
             </div>
             {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-4 py-2.5">{error}</div>}
             <button type="submit" disabled={submitting} className="gov-btn disabled:opacity-50">
-              {submitting ? "Submitting…" : "Submit Check"}
+              {submitting ? "Processing…" : useCrawler ? "Fetch & Evaluate Listing" : "Submit Check"}
             </button>
           </form>
         </div>

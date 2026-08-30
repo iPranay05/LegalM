@@ -52,6 +52,32 @@ def _is_roughly_circular(contour) -> bool:
     return circularity > 0.55
 
 
+def _has_fssai_mark_context(mask, contour, hsv) -> bool:
+    """Require a colored circle inside a matching square on white ground."""
+    x, y, w, h = cv2.boundingRect(contour)
+    if w <= 0 or h <= 0 or max(w, h) / max(min(w, h), 1) > 1.7:
+        return False
+    # The standard mark has a white square interior/background around its dot.
+    pad = max(4, int(max(w, h) * 0.8))
+    y0, y1 = max(0, y - pad), min(hsv.shape[0], y + h + pad)
+    x0, x1 = max(0, x - pad), min(hsv.shape[1], x + w + pad)
+    region = hsv[y0:y1, x0:x1]
+    white = ((region[:, :, 1] < 55) & (region[:, :, 2] > 170)).mean() if region.size else 0
+    if white < 0.12:
+        return False
+    # Look for the matching square border in the same color mask surrounding
+    # the circle (not merely a colored circle printed on packaging).
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    cx, cy = x + w / 2, y + h / 2
+    for outer in contours:
+        ox, oy, ow, oh = cv2.boundingRect(outer)
+        if ow <= w or oh <= h or ow / max(oh, 1) < 0.45 or ow / max(oh, 1) > 2.2:
+            continue
+        if ox <= cx <= ox + ow and oy <= cy <= oy + oh and ow <= w * 8 and oh <= h * 8:
+            return True
+    return False
+
+
 def detect_symbols(image_bytes: bytes, category: str = "general") -> dict:
     """
     Detect food symbols on a product label image.
@@ -76,15 +102,7 @@ def detect_symbols(image_bytes: bytes, category: str = "general") -> dict:
         "method": "unavailable",
     }
 
-    # Only check veg/non-veg for food products
-    is_food = category.lower() in FOOD_CATEGORIES
-
     if not CV2_AVAILABLE:
-        return result
-
-    if not is_food:
-        result["method"] = "skipped"
-        result["skip_reason"] = f"Category '{category}' does not require veg/non-veg marking"
         return result
 
     try:
@@ -106,12 +124,13 @@ def detect_symbols(image_bytes: bytes, category: str = "general") -> dict:
         # FSSAI symbols are small: typically 5–15mm on a label.
         # At 1200px max dimension, that's roughly 50–400px² area.
         # Anything larger is packaging color, not a symbol.
-        MAX_SYMBOL_AREA = img_area * 0.008   # max 0.8% of image area
-        MIN_SYMBOL_AREA = 50
+        MAX_SYMBOL_AREA = img_area * 0.02   # allow symbols on lower-resolution photos
+        MIN_SYMBOL_AREA = 12
 
         # ── Green dot detection (Veg) ─────────────────────────────────────────
-        lower_green = np.array([40, 100, 60])
-        upper_green = np.array([85, 255, 220])
+        # Phone glare and print on white can desaturate the green mark.
+        lower_green = np.array([30, 35, 45])
+        upper_green = np.array([95, 255, 255])
         green_mask = cv2.inRange(hsv, lower_green, upper_green)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel)
@@ -120,11 +139,24 @@ def detect_symbols(image_bytes: bytes, category: str = "general") -> dict:
             c for c in green_contours
             if MIN_SYMBOL_AREA < cv2.contourArea(c) < MAX_SYMBOL_AREA
             and _is_roughly_circular(c)
+            and _has_fssai_mark_context(green_mask, c, hsv)
         ]
         if veg_candidates:
             largest = max(veg_candidates, key=cv2.contourArea)
             result["veg_dot"] = True
             result["veg_confidence"] = round(min(cv2.contourArea(largest) / 400, 1.0), 2)
+        else:
+            # At phone-photo resolution the circle and thin square border can
+            # merge into one non-circular contour. Recognize that complete
+            # square mark by its compact geometry and white center.
+            for contour in green_contours:
+                x, y, w0, h0 = cv2.boundingRect(contour)
+                if 20 <= w0 <= 260 and 20 <= h0 <= 260 and 0.55 <= w0 / max(h0, 1) <= 1.8:
+                    inner = hsv[y + h0 // 5:y + 4 * h0 // 5, x + w0 // 5:x + 4 * w0 // 5]
+                    if inner.size and ((inner[:, :, 1] < 80) & (inner[:, :, 2] > 150)).mean() > 0.18:
+                        result["veg_dot"] = True
+                        result["veg_confidence"] = 0.65
+                        break
 
         # ── Brown/maroon dot detection (Non-Veg) ──────────────────────────────
         lower_brown = np.array([0, 80, 30])
@@ -138,8 +170,11 @@ def detect_symbols(image_bytes: bytes, category: str = "general") -> dict:
         brown_contours, _ = cv2.findContours(brown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         nonveg_candidates = [
             c for c in brown_contours
-            if MIN_SYMBOL_AREA < cv2.contourArea(c) < MAX_SYMBOL_AREA
+            # Brown packaging graphics are common; the FSSAI mark is a small,
+            # compact dot, so use a stricter area ceiling for brown candidates.
+            if max(20, MIN_SYMBOL_AREA) < cv2.contourArea(c) < img_area * 0.003
             and _is_roughly_circular(c)
+            and _has_fssai_mark_context(brown_mask, c, hsv)
         ]
         if nonveg_candidates:
             largest = max(nonveg_candidates, key=cv2.contourArea)

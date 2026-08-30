@@ -48,6 +48,7 @@ export interface Scan {
   bounding_boxes?: BoundingBox[];
   pipeline_status?: string;
   calibration_method?: string;
+  calibration_data?: Record<string, unknown>;
   symbols_detected?: SymbolResult;
   is_compliant?: boolean;
   compliance_headline?: "AllPass" | "HasFailures" | "NeedsManualReview";
@@ -118,6 +119,7 @@ export interface SymbolResult {
   veg_confidence?: number;
   non_veg_confidence?: number;
   method?: string;
+  tamper_detection?: { status: string; signals?: string[]; confidence?: number };
 }
 
 export interface ManualFinding {
@@ -193,6 +195,7 @@ export interface Product {
   manufacturer_id?: number;
   manufacturer?: Manufacturer;
   is_compliant?: boolean;
+  compliance_headline?: "AllPass" | "HasFailures" | "NeedsManualReview";
   last_compliance_score?: number;
   last_scan_id?: string;
   registered_by_manufacturer: boolean;

@@ -25,6 +25,44 @@ except ImportError:
 # Standard reference object: A4 paper is 210 x 297 mm
 A4_WIDTH_MM = 210.0
 A4_HEIGHT_MM = 297.0
+EAN13_WIDTH_MM = 37.29
+
+def calibrate_from_barcode(image_bytes: bytes) -> Optional[dict]:
+    """Estimate scale from a localized EAN/UPC barcode of known nominal width."""
+    try:
+        from pyzbar import pyzbar
+        from PIL import Image
+        import io
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        import numpy as np
+        arr = np.array(image)
+        candidates = []
+        def collect(frame, scale=1.0):
+            for obj in pyzbar.decode(frame):
+                if obj.type in ("EAN13", "EAN8", "UPCA", "UPC-A") and obj.rect.width / scale > 12:
+                    candidates.append((obj, scale))
+        collect(arr)
+        if not candidates:
+            gray = np.asarray(image.convert("L"))
+            collect(gray)
+            h, w = gray.shape
+            scale = max(2.0, 1600 / max(h, w))
+            enlarged = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC) if CV2_AVAILABLE else gray
+            collect(enlarged, scale)
+            if CV2_AVAILABLE:
+                threshold = cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+                collect(threshold, scale)
+        if not candidates:
+            return None
+        obj, scale = max(candidates, key=lambda item: item[0].rect.width / item[1])
+        reference_width_px = obj.rect.width / scale
+        width_mm = EAN13_WIDTH_MM if obj.type == "EAN13" else 29.83
+        return {"method": "barcode_reference", "verified": True,
+                "mm_per_px_x": round(width_mm / reference_width_px, 6),
+                "mm_per_px_y": round(width_mm / reference_width_px, 6), "reference": obj.type,
+                "reference_width_px": round(reference_width_px, 2), "confidence": 0.6}
+    except Exception:
+        return None
 
 
 def _detect_a4_reference(bgr_image) -> Optional[dict]:
@@ -77,6 +115,7 @@ def _detect_a4_reference(bgr_image) -> Optional[dict]:
             mm_per_px_y = A4_HEIGHT_MM / px_h
 
         return {
+            "verified": True,
             "mm_per_px_x": round(mm_per_px_x, 4),
             "mm_per_px_y": round(mm_per_px_y, 4),
             "reference": "a4_paper",
@@ -129,6 +168,7 @@ def calibrate_from_inspector_input(width_mm: float, height_mm: float,
         return {"method": "unverified", "reason": "Invalid pixel dimensions"}
     return {
         "method": "inspector",
+        "verified": True,
         "mm_per_px_x": round(width_mm / img_width_px, 4),
         "mm_per_px_y": round(height_mm / img_height_px, 4),
         "provided_width_mm": width_mm,
