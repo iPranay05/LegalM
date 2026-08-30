@@ -1,0 +1,107 @@
+# Legal Metrology Compliance System — SIH 26034
+
+**Ministry of Consumer Affairs, Food & Public Distribution**  
+Automated regulatory compliance verification system for packaged commodities under the Legal Metrology (Packaged Commodities) Rules, 2011.
+
+---
+
+## Architecture Overview
+
+```
+┌───────────────────────────┐                 ┌───────────────────────────────┐
+│   📱 Mobile App (Expo)    │──HTTP (Async)──►│     🐍 FastAPI Backend        │
+│   Field Inspector Scanner │                 │     Port 8000                 │
+└───────────────────────────┘                 └──────────────┬────────────────┘
+                                                             │ Enqueues Task
+┌───────────────────────────┐                 ┌──────────────▼────────────────┐
+│   🌐 Web Dashboard (Next) │──HTTP (Poll)───►│   ⚡ Celery Background Worker  │
+│   Controller & Analyst UI │                 │   (OCR, Vision, Calibration,  │
+└───────────────────────────┘                 │    Rule Engine, Evidence Crop)│
+                                              └──────────────┬────────────────┘
+                                                             │
+                                     ┌───────────────────────┴───────────────────────┐
+                                     │                                               │
+                              ┌──────▼──────┐                                 ┌──────▼──────┐
+                              │ 🐘 Postgres │                                 │  🔴 Redis   │
+                              │ Persistence │                                 │ Queue/State │
+                              └─────────────┘                                 └─────────────┘
+```
+
+---
+
+## Quickstart (Docker Compose — Recommended)
+
+The entire backend perception stack (FastAPI, Celery worker, PostgreSQL, Redis) runs as containerized services.
+
+### 1. Launch the Stack
+```bash
+docker compose up --build -d
+```
+
+### 2. Seed Initial Demonstration Data
+Seed commodity categories, versioned rules, demo manufacturers/products, and user accounts for all roles:
+```bash
+docker compose run --rm backend python seed.py
+```
+
+### 3. Run the Web Dashboard
+```bash
+cd web
+npm install
+npm run dev
+```
+Open: [http://localhost:3000](http://localhost:3000)
+
+Scan submission is intentionally asynchronous and requires Redis and the Celery worker to be running. If only FastAPI is started, submission returns a clear `503 Perception Pipeline Unavailable`; there is no silent synchronous fallback.
+
+### 4. Run the Mobile App (Expo)
+```bash
+cd mobile
+npm install
+npx expo start
+```
+Scan the QR code with the **Expo Go** mobile app. (Set `API_BASE_URL` in `mobile/lib/api.ts` to your machine's LAN IP).
+
+---
+
+## Pre-Seeded Demo Accounts
+
+| Role | Email | Password | Scope & Permissions |
+|---|---|---|---|
+| **Controller (Admin)** | `controller@lm.gov.in` / `admin@lm.gov.in` | `controller1234` / `admin1234` | Full system access, rule creation/retirement, officer management, reports |
+| **Inspector** | `inspector@lm.gov.in` | `inspector1234` | Upload scans, perform field inspections, verify evidence & manual findings |
+| **Analyst** | `analyst@lm.gov.in` | `analyst1234` | Read-only analytics dashboard, compliance trends, district aggregations |
+| **Manufacturer Self-Check** | `manufacturer@tata.com` | `mfr1234` | Self-compliance upload, view only their own manufacturer scans & products |
+
+---
+
+## Perception Pipeline Behavior
+
+- **Non-Blocking Ingestion**: `POST /scan/upload` validates and persists images synchronously, creates a `Scan(pipeline_status="pending")`, and returns `HTTP 201` in under 100ms.
+- **Background Perception**: Celery background workers execute the OCR (Groq Vision / Tesseract), image calibration, veg/non-veg symbol detection, and 5-outcome rule resolution.
+- **Fail-Safe Pipeline**: If Redis or Celery workers are unreachable, scan submission returns `HTTP 503 (Perception Pipeline Unavailable)`. The system never silently falls back to blocking inline execution.
+- **Evidence Traceability**: Every compliance check stores pixel/normalized bounding box regions. Generated PDF and DOCX reports embed visual image crops of every evaluated declaration.
+
+---
+
+## Environment Variables
+
+| Variable | Default (Dev) | Description |
+|---|---|---|
+| `ENVIRONMENT` | `development` | `development` (SQLite fallback allowed) or `production` (strictly requires Postgres + Secret) |
+| `DATABASE_URL` | `postgresql://legalm:...` | SQLAlchemy connection string |
+| `SECRET_KEY` | (Required in prod) | JWT token signing key |
+| `DEBUG` | `False` | Debug mode (false prevents leaking internal stack traces / SQL) |
+| `CORS_ORIGINS` | `http://localhost:3000,...` | Comma-separated list of allowed origins |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Celery broker URL |
+| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/0` | Celery result backend URL |
+| `GROQ_API_KEY` | *(Optional)* | Groq Vision API key for enhanced label extraction |
+
+---
+
+## Testing & Quality Assurance
+
+Run the automated test suite inside Docker:
+```bash
+docker compose run --rm backend pytest -v
+```
