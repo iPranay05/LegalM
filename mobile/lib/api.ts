@@ -1,12 +1,15 @@
 import axios from "axios";
 import * as SecureStore from "expo-secure-store";
+import Constants from "expo-constants";
 
-// Same LegalM FastAPI backend the web app talks to (see web/lib/api.ts).
-// Change this to your machine's LAN IP when testing on a physical device,
-// e.g. "http://192.168.1.42:8000". The web app reads this from
-// NEXT_PUBLIC_API_URL; Expo apps can't read a .env at runtime as easily, so
-// it's set here directly.
-export const API_BASE_URL = "http://192.168.16.110:8000";
+// API base URL is read from app.json → expo.extra.apiBaseUrl at runtime.
+// To change the backend address, update that one field in app.json and
+// restart Metro — no need to touch any TypeScript file.
+//
+// When running in Expo Go / development builds the value comes from your
+// local app.json. In a production build it is baked in at build time.
+const extraUrl: string | undefined = Constants.expoConfig?.extra?.apiBaseUrl;
+export const API_BASE_URL = extraUrl ?? "http://10.78.123.24:8000";
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -14,7 +17,7 @@ const api = axios.create({
 });
 
 // Attach JWT token to every request — same auth scheme as the web app
-// (Authorization: Bearer <token>), just backed by SecureStore instead of
+// (Authorization: Bearer <token>), backed by SecureStore instead of
 // localStorage.
 api.interceptors.request.use(async (config) => {
   const token = await SecureStore.getItemAsync("auth_token");
@@ -25,7 +28,7 @@ api.interceptors.request.use(async (config) => {
 });
 
 // A token signed with an old SECRET_KEY (or an expired token) must not be
-// retried forever. Clear it so the app's next launch sends the user to login.
+// retried forever. Clear it so the next launch sends the user to login.
 api.interceptors.response.use(
   (response) => response,
   async (error) => {

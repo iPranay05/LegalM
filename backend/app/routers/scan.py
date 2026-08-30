@@ -454,6 +454,11 @@ def get_scan_result_tabs(
             "result": result,
             "notes": check.notes if check else None,
         }
+        if key == "font_size" and check and check.notes:
+            import re
+            measured = re.search(r"Measured physical text height:\s*([0-9.]+\s*mm)", check.notes)
+            if measured:
+                entry["extracted_value"] = measured.group(1)
         all_rules.append(entry)
         if result in ("ManualReviewRequired", "NotApplicable"):
             continue

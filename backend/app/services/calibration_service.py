@@ -86,34 +86,50 @@ def _detect_a4_reference(bgr_image) -> Optional[dict]:
         mask_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         contours = list(contours) + list(mask_contours)
 
-        # Find largest rectangle-like contour. Require a substantial sheet,
-        # but allow perspective and rounded/shadowed edges.
+        # Find largest rectangle-like contour. Require a substantial white sheet
+        # covering at least 25% of the frame, with a tight polygon approximation
+        # so curved product edges don't qualify as rectangles.
         candidates = []
         image_area = float(bgr_image.shape[0] * bgr_image.shape[1])
         for c in contours:
             peri = cv2.arcLength(c, True)
-            approx = cv2.approxPolyDP(c, 0.035 * peri, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
             area = cv2.contourArea(c)
-            if len(approx) == 4 and area > max(10000, image_area * 0.15):
-                candidates.append((cv2.contourArea(c), approx))
+            if len(approx) == 4 and area > max(15000, image_area * 0.25):
+                # Additional check: the bounding rect must be near-white in HSV
+                x, y, w, h = cv2.boundingRect(approx)
+                roi = bgr_image[y:y+h, x:x+w]
+                if roi.size == 0:
+                    continue
+                hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                # Mean saturation < 60 and mean value > 160 → white/light grey paper
+                mean_sat = float(hsv_roi[:, :, 1].mean())
+                mean_val = float(hsv_roi[:, :, 2].mean())
+                if mean_sat < 60 and mean_val > 160:
+                    candidates.append((area, approx))
 
         # Phone photos commonly have a white sheet whose boundary is partly
         # outside the frame or broken by shadows. Recover its measured extent
         # from the largest bright contour when a clean four-corner contour is
-        # unavailable, while still requiring an A4-like aspect ratio.
+        # unavailable. A4 aspect ratio is 1.414; allow ±15% for perspective
+        # distortion. Also require the region to be genuinely white (low
+        # saturation, high value in HSV) — not just any bright-coloured object.
         if not candidates:
-            bright = cv2.threshold(gray, 145, 255, cv2.THRESH_BINARY)[1]
-            bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8))
-            bright_contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for contour in sorted(bright_contours, key=cv2.contourArea, reverse=True):
+            hsv = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2HSV)
+            # White mask: saturation < 50, value > 180
+            white_mask = cv2.inRange(hsv, np.array([0, 0, 180]), np.array([180, 50, 255]))
+            white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8))
+            white_contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in sorted(white_contours, key=cv2.contourArea, reverse=True):
                 area = cv2.contourArea(contour)
-                if area < image_area * 0.25:
+                if area < image_area * 0.30:
                     continue
                 _, (rw, rh), _ = cv2.minAreaRect(contour)
                 if min(rw, rh) <= 0:
                     continue
                 ratio = max(rw, rh) / min(rw, rh)
-                if 1.10 <= ratio <= 2.00:
+                # A4 = 1.414; accept 1.20–1.65 only (tight window around √2)
+                if 1.20 <= ratio <= 1.65:
                     rect = cv2.boxPoints(cv2.minAreaRect(contour)).astype(float)
                     candidates.append((area, rect.reshape(4, 1, 2)))
                     break

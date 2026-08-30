@@ -9,18 +9,25 @@
     "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "in.gov.lmcompliance"
+      "bundleIdentifier": "in.gov.lmcompliance",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "LM Compliance uses your location to automatically tag the shop address on scans, so inspection records include the correct district and state.",
+        "NSLocationAlwaysUsageDescription": "LM Compliance uses your location to tag scans with the correct district and state."
+      }
     },
     "android": {
       "package": "in.gov.lmcompliance",
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE"
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION"
       ]
     },
     "plugins": [
       "expo-router",
+      "expo-location",
       [
         "expo-camera",
         {
@@ -37,6 +44,9 @@
     "scheme": "lmcompliance",
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "apiBaseUrl": "http://10.78.123.24:8000"
     }
   }
 }

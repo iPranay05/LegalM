@@ -8,10 +8,13 @@ import Card from "../../components/Card";
 import StatusBadge from "../../components/StatusBadge";
 import EmptyState from "../../components/EmptyState";
 import TopBar from "../../components/TopBar";
+import OfflineBanner from "../../components/OfflineBanner";
 import api from "../../lib/api";
 import { Colors, Type, Radius } from "../../lib/theme";
 import { Scan, PRODUCT_CATEGORIES } from "../../lib/types";
 import { formatDate, scanStatus } from "../../lib/format";
+import { listQueuedScans, QueuedScan, resetToPending } from "../../lib/offlineQueue";
+import { onQueueChange, triggerSync } from "../../lib/syncService";
 
 const PAGE_SIZE = 15;
 const STATUS_OPTIONS = [
@@ -34,6 +37,21 @@ export default function HistoryScreen() {
   const [category, setCategory] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+
+  // Offline queue state
+  const [queuedScans, setQueuedScans] = useState<QueuedScan[]>([]);
+
+  async function refreshQueue() {
+    const items = await listQueuedScans();
+    setQueuedScans(items);
+  }
+
+  // Keep queue list in sync with any uploads happening in the background
+  useEffect(() => {
+    refreshQueue();
+    const unsub = onQueueChange(refreshQueue);
+    return unsub;
+  }, []);
 
   const fetchPage = useCallback(async (page: number, isRefresh = false) => {
     try {
@@ -69,11 +87,12 @@ export default function HistoryScreen() {
     }
   }, [category, search, status, router]);
 
-  useFocusEffect(useCallback(() => { setLoading(true); fetchPage(0); }, [fetchPage]));
+  useFocusEffect(useCallback(() => { setLoading(true); fetchPage(0); refreshQueue(); }, [fetchPage]));
 
   function onRefresh() {
     setRefreshing(true);
     fetchPage(0, true);
+    refreshQueue();
   }
 
   function onLoadMore() {
@@ -93,15 +112,15 @@ export default function HistoryScreen() {
     setStatus("");
     setFiltersOpen(false);
     setLoading(true);
+    fetchPage(0);
   }
-
-  useEffect(() => { if (!category && !status) fetchPage(0); }, [category, status]);
 
   const activeFilterCount = (category ? 1 : 0) + (status ? 1 : 0);
 
   return (
     <View style={styles.container}>
       <TopBar title="Scan History" subtitle="Real records from the LegalM backend" onSearchPress={() => setSearchOpen((v) => !v)} />
+      <OfflineBanner />
 
       {searchOpen && (
         <View style={styles.searchBar}>
@@ -142,7 +161,31 @@ export default function HistoryScreen() {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />}
           onEndReached={onLoadMore}
           onEndReachedThreshold={0.4}
-          ListEmptyComponent={<EmptyState icon="📋" title="No scans found" subtitle="Try adjusting your filters, or start a new inspection." />}
+          ListHeaderComponent={
+            queuedScans.length > 0 ? (
+              <View style={styles.queueSection}>
+                <Text style={styles.queueSectionTitle}>
+                  ⏳ Pending Upload ({queuedScans.length})
+                </Text>
+                {queuedScans.map((item) => (
+                  <QueuedScanCard
+                    key={item.localId}
+                    item={item}
+                    onRetry={async () => {
+                      await resetToPending(item.localId);
+                      await triggerSync();
+                    }}
+                  />
+                ))}
+                <View style={styles.queueDivider} />
+              </View>
+            ) : null
+          }
+          ListEmptyComponent={
+            queuedScans.length === 0
+              ? <EmptyState icon="📋" title="No scans found" subtitle="Try adjusting your filters, or start a new inspection." />
+              : null
+          }
           ListFooterComponent={loadingMore ? <ActivityIndicator style={{ marginVertical: 16 }} color={Colors.primary} /> : null}
           renderItem={({ item }) => <ScanCard scan={item} onPress={() => router.push({ pathname: "/result", params: { scan_id: item.scan_id } })} />}
         />
@@ -211,6 +254,59 @@ function ScanCard({ scan, onPress }: { scan: Scan; onPress: () => void }) {
   );
 }
 
+function QueuedScanCard({ item, onRetry }: { item: QueuedScan; onRetry: () => void }) {
+  const statusColors: Record<string, string> = {
+    pending: "#92400e",
+    uploading: Colors.secondary,
+    failed: Colors.statusFail,
+  };
+  const statusLabels: Record<string, string> = {
+    pending: "Pending",
+    uploading: "Uploading…",
+    failed: `Failed (attempt ${item.retryCount})`,
+  };
+  const borderColor = statusColors[item.status] ?? Colors.borderSubtle;
+
+  return (
+    <Card style={[styles.scanCard, styles.queuedCard, { borderLeftColor: borderColor }]}>
+      <View style={styles.scanCardTop}>
+        <View style={styles.queueBadge}>
+          <Text style={styles.queueBadgeText}>
+            {item.status === "uploading" ? "⏫" : item.status === "failed" ? "⚠️" : "⏳"}
+            {"  "}{statusLabels[item.status]}
+          </Text>
+        </View>
+        <Text style={styles.scanDate}>{formatDate(item.createdAt, { withTime: false })}</Text>
+      </View>
+
+      <Text style={styles.scanProduct} numberOfLines={1}>
+        {item.imageUris.length} photo{item.imageUris.length > 1 ? "s" : ""} · {item.category}
+      </Text>
+
+      {(item.gpsCity || item.location) ? (
+        <Text style={styles.queueLocation} numberOfLines={1}>
+          📍 {item.gpsCity
+            ? [item.gpsCity, item.gpsDistrict, item.gpsState].filter(Boolean).join(", ")
+            : item.location}
+        </Text>
+      ) : null}
+
+      {item.shopName ? (
+        <Text style={styles.scanManufacturer} numberOfLines={1}>🏪 {item.shopName}</Text>
+      ) : null}
+
+      {item.status === "failed" && (
+        <View style={styles.queueRetryRow}>
+          <Text style={styles.queueError} numberOfLines={1}>{item.lastError}</Text>
+          <TouchableOpacity style={styles.queueRetryBtn} onPress={onRetry}>
+            <Text style={styles.queueRetryText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+    </Card>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   searchBar: { flexDirection: "row", alignItems: "center", gap: 8, padding: 12, backgroundColor: Colors.white, borderBottomWidth: 1, borderBottomColor: Colors.borderSubtle },
@@ -243,4 +339,16 @@ const styles = StyleSheet.create({
   modalClearText: { color: Colors.onSurfaceVariant, fontWeight: "700", fontSize: 13 },
   modalApply: { flex: 1, backgroundColor: Colors.primary, borderRadius: Radius.DEFAULT, alignItems: "center", paddingVertical: 13 },
   modalApplyText: { color: Colors.onPrimary, fontWeight: "700", fontSize: 13 },
+  // Offline queue styles
+  queueSection: { marginBottom: 4 },
+  queueSectionTitle: { fontSize: 12, fontWeight: "800", color: "#92400e", marginBottom: 10, letterSpacing: 0.3, textTransform: "uppercase" },
+  queueDivider: { height: 1, backgroundColor: Colors.borderSubtle, marginBottom: 16, marginTop: 4 },
+  queuedCard: { borderLeftWidth: 3, opacity: 0.95 },
+  queueBadge: { flexDirection: "row", alignItems: "center" },
+  queueBadgeText: { fontSize: 12, fontWeight: "700", color: Colors.onSurfaceVariant },
+  queueLocation: { fontSize: 12, color: Colors.secondary, marginTop: 2 },
+  queueRetryRow: { flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 },
+  queueError: { flex: 1, fontSize: 11, color: Colors.statusFail },
+  queueRetryBtn: { paddingHorizontal: 10, paddingVertical: 5, backgroundColor: Colors.statusFail, borderRadius: Radius.DEFAULT },
+  queueRetryText: { fontSize: 11, fontWeight: "700", color: "#fff" },
 });

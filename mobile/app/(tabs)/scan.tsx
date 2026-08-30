@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   View, Text, TouchableOpacity, StyleSheet, ScrollView,
   Alert, ActivityIndicator, TextInput, Modal, FlatList, Image,
@@ -9,9 +9,12 @@ import { useRouter } from "expo-router";
 import * as Haptics from "expo-haptics";
 import { SafeAreaView } from "react-native-safe-area-context";
 import TopBar from "../../components/TopBar";
+import OfflineBanner from "../../components/OfflineBanner";
 import { Colors, Type, Radius } from "../../lib/theme";
 import api from "../../lib/api";
 import { PRODUCT_CATEGORIES } from "../../lib/types";
+import { getCurrentLocation, GpsResult } from "../../lib/gpsService";
+import { enqueueOfflineScan } from "../../lib/offlineQueue";
 
 const MAX_IMAGES = 6;
 const PANEL_LABELS = ["Front", "Back", "Side 1", "Side 2", "Nutritional Info", "Other"];
@@ -31,6 +34,30 @@ export default function ScanScreen() {
   const [barcodeScanning, setBarcodeScanning] = useState(false);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const barcodeScanned = useRef(false);
+
+  // GPS state
+  const [gpsData, setGpsData] = useState<GpsResult | null>(null);
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [gpsAttached, setGpsAttached] = useState(false);
+
+  // Auto-fetch GPS on mount
+  useEffect(() => {
+    fetchGps(false);
+  }, []);
+
+  async function fetchGps(showAlerts: boolean) {
+    setGpsLoading(true);
+    const result = await getCurrentLocation();
+    setGpsLoading(false);
+    if (result.ok) {
+      setGpsData(result.data);
+      setGpsAttached(true);
+      // Auto-fill only if inspector hasn't typed anything yet
+      if (!location && result.data.location) setLocation(result.data.location);
+    } else if (showAlerts) {
+      Alert.alert("Location", result.message);
+    }
+  }
 
   const selectedCategory = PRODUCT_CATEGORIES.find((c) => c.value === category);
   const canAddMore = images.length < MAX_IMAGES;
@@ -88,6 +115,9 @@ export default function ScanScreen() {
   // (Celery + OCR + rule engine), so /scan/upload(-multi) returns immediately
   // with pipeline_status="pending" — not a finished result. We hand off to the
   // result screen, which polls /scan/{id}/status the same way the web app does.
+  //
+  // If the network is unavailable, we queue the scan locally and show a
+  // confirmation so the inspector knows it is safe to move on.
   async function submitScan() {
     if (images.length === 0) {
       Alert.alert("No Images", "Add at least one photo of the product label.");
@@ -108,21 +138,61 @@ export default function ScanScreen() {
       formData.append("category", category);
       if (shopName) formData.append("shop_name", shopName);
       if (location) formData.append("location", location);
+      // Attach GPS-derived state/district when available
+      if (gpsData?.state) formData.append("state", gpsData.state);
+      if (gpsData?.district) formData.append("district", gpsData.district);
 
       const res = await api.post(endpoint, formData, { headers: { "Content-Type": "multipart/form-data" } });
 
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setImages([]);
       setScannedBarcode(null);
+      setGpsData(null);
+      setGpsAttached(false);
       router.push({ pathname: "/result", params: { scan_id: res.data.scan_id } });
     } catch (err: any) {
       const status = err?.response?.status;
+
+      // Network errors (no response) → queue offline
+      if (!err?.response) {
+        await _queueOffline();
+        return;
+      }
+
       const msg = status === 503
         ? "Perception pipeline unavailable — the background worker queue could not be reached. Try again shortly."
         : err?.response?.data?.detail || err?.message || "Scan failed. Try again.";
       Alert.alert("Error", msg);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function _queueOffline() {
+    try {
+      await enqueueOfflineScan({
+        imageUris: images,
+        category,
+        shopName,
+        location,
+        gpsLatitude: gpsData?.latitude,
+        gpsLongitude: gpsData?.longitude,
+        gpsState: gpsData?.state,
+        gpsDistrict: gpsData?.district,
+        gpsCity: gpsData?.city,
+      });
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      setImages([]);
+      setScannedBarcode(null);
+      setGpsData(null);
+      setGpsAttached(false);
+      Alert.alert(
+        "Saved Offline",
+        "No network connection. Your scan has been saved and will upload automatically when you're back online.",
+        [{ text: "OK" }]
+      );
+    } catch {
+      Alert.alert("Error", "Could not save the scan offline. Please try again.");
     }
   }
 
@@ -156,6 +226,7 @@ export default function ScanScreen() {
   return (
     <View style={styles.container}>
       <TopBar title="New Inspection" subtitle="Legal Metrology (PC) Rules, 2011" />
+      <OfflineBanner />
 
       <View style={styles.modeTabs}>
         {(["label", "barcode"] as Mode[]).map((m) => (
@@ -273,6 +344,29 @@ export default function ScanScreen() {
           <Text style={styles.fieldLabel}>Shop / Establishment Name</Text>
           <TextInput style={styles.input} value={shopName} onChangeText={setShopName} placeholder="e.g. Ram General Store" placeholderTextColor={Colors.onSurfaceMuted} />
           <Text style={styles.fieldLabel}>Location / Area</Text>
+          {/* GPS pill — shows status and lets inspector refresh or detach */}
+          {gpsLoading ? (
+            <View style={styles.gpsPill}>
+              <ActivityIndicator size="small" color={Colors.secondary} />
+              <Text style={styles.gpsPillText}>Getting GPS location…</Text>
+            </View>
+          ) : gpsAttached && gpsData ? (
+            <View style={styles.gpsPill}>
+              <Text style={styles.gpsPillIcon}>📍</Text>
+              <Text style={styles.gpsPillText} numberOfLines={1}>
+                {gpsData.city || gpsData.district || "Location attached"}
+                {gpsData.state ? `, ${gpsData.state}` : ""}
+              </Text>
+              <TouchableOpacity onPress={() => { setGpsData(null); setGpsAttached(false); }}>
+                <Text style={styles.gpsPillClear}>✕</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity style={styles.gpsRefreshBtn} onPress={() => fetchGps(true)} activeOpacity={0.8}>
+              <Text style={styles.gpsRefreshIcon}>📍</Text>
+              <Text style={styles.gpsRefreshText}>Auto-fill from GPS</Text>
+            </TouchableOpacity>
+          )}
           <TextInput style={styles.input} value={location} onChangeText={setLocation} placeholder="e.g. Gandhi Nagar, Pune" placeholderTextColor={Colors.onSurfaceMuted} />
         </View>
 
@@ -392,6 +486,14 @@ const styles = StyleSheet.create({
   submitBtnText: { color: Colors.onPrimary, fontSize: 16, fontWeight: "700", letterSpacing: 0.3 },
   loadingRow: { flexDirection: "row", alignItems: "center" },
   note: { fontSize: 11, color: Colors.onSurfaceMuted, textAlign: "center", lineHeight: 16, marginBottom: 8 },
+  // GPS styles
+  gpsPill: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "rgba(16,185,129,0.09)", borderRadius: Radius.DEFAULT, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 10, borderWidth: 1, borderColor: "rgba(16,185,129,0.3)" },
+  gpsPillIcon: { fontSize: 14 },
+  gpsPillText: { flex: 1, fontSize: 13, color: Colors.statusPass, fontWeight: "600" },
+  gpsPillClear: { fontSize: 14, color: Colors.onSurfaceMuted, fontWeight: "700" },
+  gpsRefreshBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 8, paddingHorizontal: 12, borderRadius: Radius.DEFAULT, borderWidth: 1.5, borderColor: Colors.borderSubtle, backgroundColor: Colors.surfaceContainerLow, marginBottom: 10 },
+  gpsRefreshIcon: { fontSize: 14 },
+  gpsRefreshText: { fontSize: 12, color: Colors.secondary, fontWeight: "600" },
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
   modalSheet: { backgroundColor: Colors.white, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, maxHeight: "60%" },
   modalTitle: { ...Type.headlineSm, color: Colors.onSurface, marginBottom: 16, textAlign: "center" },
