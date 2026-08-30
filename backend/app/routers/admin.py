@@ -36,6 +36,22 @@ class RuleCreate(BaseModel):
     weight: int = Field(default=10, ge=1, le=100)
 
 
+class RuleUpdate(BaseModel):
+    """Editable rule fields; updates create a new immutable version."""
+    title: str
+    description: Optional[str] = None
+    legal_reference: Optional[str] = None
+    effective_from: date
+    effective_to: Optional[date] = None
+    has_transitional_clause: bool = False
+    commodity_category_id: Optional[int] = None
+    check_type: RuleCheckType = RuleCheckType.Presence
+    category_scope: Optional[List[str]] = None
+    is_mandatory: bool = True
+    is_conduct_bucket: bool = False
+    weight: int = Field(default=10, ge=1, le=100)
+
+
 class RuleOut(BaseModel):
     id: int
     rule_family: str
@@ -56,6 +72,7 @@ class RuleOut(BaseModel):
     retired_at: Optional[datetime] = None
     created_at: datetime
     relaxation_count: Optional[int] = 0
+    version: Optional[int] = None
     class Config:
         from_attributes = True
 
@@ -160,6 +177,33 @@ def create_rule(
     db.commit()
     db.refresh(rule)
     return rule
+
+
+@router.patch("/rules/{rule_id}", response_model=RuleOut)
+def update_rule(
+    rule_id: int,
+    payload: RuleUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Version an active rule instead of mutating history used by old scans."""
+    previous = db.query(Rule).filter(Rule.id == rule_id).first()
+    if not previous:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    if not previous.is_active:
+        raise HTTPException(status_code=400, detail="Only the active version can be edited")
+    siblings = db.query(Rule).filter(Rule.rule_family == previous.rule_family).count()
+    next_code = f"{previous.code}-v{siblings + 1}"
+    previous.is_active = False
+    previous.effective_to = payload.effective_from
+    previous.retired_at = datetime.utcnow()
+    previous.retired_by_id = current_user.id
+    version = Rule(**payload.model_dump(), rule_family=previous.rule_family,
+                   code=next_code, created_by_id=current_user.id, is_active=True)
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+    return version
 
 
 @router.get("/rules/{rule_id}", response_model=RuleOut)

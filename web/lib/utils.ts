@@ -7,7 +7,10 @@ export function cn(...inputs: ClassValue[]) {
 
 export function formatDate(iso: string, fmt = "dd MMM yyyy, hh:mm a") {
   try {
-    return format(parseISO(iso), fmt);
+    // API timestamps are UTC but legacy records are serialized without a zone.
+    // Explicitly treat those as UTC so the browser converts them to local time.
+    const normalized = iso && !/[zZ]|[+-]\d\d:?\d\d$/.test(iso) && iso.includes("T") ? `${iso}Z` : iso;
+    return format(parseISO(normalized), fmt);
   } catch {
     return iso;
   }

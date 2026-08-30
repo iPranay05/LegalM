@@ -40,6 +40,7 @@ export default function ScanDetailPage() {
   const [submittingFinding, setSubmittingFinding] = useState(false);
   const [confirmingBbox, setConfirmingBbox] = useState<string | null>(null);
   const [imageIndex, setImageIndex] = useState(0);
+  const [reprocessing, setReprocessing] = useState(false);
   const touchStartX = useRef<number | null>(null);
 
   useEffect(() => {
@@ -101,6 +102,19 @@ export default function ScanDetailPage() {
       if (e?.response?.status === 401) router.push("/login");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function reprocessScan() {
+    setReprocessing(true);
+    try {
+      await api.post(`/scan/${scanId}/reprocess`);
+      setPipelineStatus("pending");
+      await loadAll();
+    } catch (e: any) {
+      setReportError(e?.response?.data?.detail || "Could not reprocess this scan");
+    } finally {
+      setReprocessing(false);
     }
   }
 
@@ -327,12 +341,18 @@ export default function ScanDetailPage() {
   return (
     <div className="space-y-5">
       {/* Breadcrumb */}
-      <div className="flex items-center gap-2 text-sm text-gray-500">
+      <div className="flex items-center justify-between gap-2 text-sm text-gray-500">
+        <div className="flex items-center gap-2">
         <Link href="/dashboard" className="hover:text-gov-navy">Dashboard</Link>
         <span>/</span>
         <Link href="/scans" className="hover:text-gov-navy">Scans</Link>
         <span>/</span>
         <span className="text-gray-800 font-medium truncate max-w-xs">{scanId}</span>
+        </div>
+        <button onClick={reprocessScan} disabled={reprocessing || scan.pipeline_status === "pending" || scan.pipeline_status === "processing"}
+          className="gov-btn text-xs px-3 py-1.5 whitespace-nowrap disabled:opacity-50">
+          {reprocessing ? "Reprocessing…" : "↻ Reprocess scan"}
+        </button>
       </div>
 
       {/* Review alert */}
@@ -375,10 +395,14 @@ export default function ScanDetailPage() {
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-blue-50 text-blue-700 border-blue-200 uppercase">Officer Reviewed</span>
               )}
               {scan.calibration_method && (
-                <span className="text-[10px] text-gray-400 font-semibold">
-                  Calibration: {scan.calibration_method}
-                  {scan.calibration_method === "barcode_reference" && " (barcode reference estimate)"}
-                </span>
+                <div className="text-[10px] text-gray-500 font-semibold">
+                  <span>Calibration: {scan.calibration_method}</span>
+                  {scan.calibration_method === "barcode_reference" && scan.calibration_data?.verified && (
+                    <span className="ml-2 text-green-700">
+                      ✓ verified ({String(scan.calibration_data.reference || "barcode")}, {String(scan.calibration_data.reference_width_px || "?")} px; {String(scan.calibration_data.mm_per_px_y || "?")} mm/px)
+                    </span>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -386,6 +410,10 @@ export default function ScanDetailPage() {
             <ComplianceBadge isCompliant={scan.is_compliant} headline={scan.compliance_summary?.headline} showScore score={scan.compliance_score} />
             <div className="w-48"><ScoreBar score={scan.compliance_score ?? 0} height="h-3" /></div>
             <p className="text-xs text-gray-400">Scanned {formatDate(scan.created_at)}</p>
+            <button onClick={reprocessScan} disabled={reprocessing || scan.pipeline_status === "pending" || scan.pipeline_status === "processing"}
+              className="text-xs text-gov-navy hover:underline disabled:opacity-50">
+              {reprocessing ? "Reprocessing…" : "Reprocess scan"}
+            </button>
           </div>
         </div>
       </div>
@@ -401,6 +429,13 @@ export default function ScanDetailPage() {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {scan.calibration_data?.verified === true && manualReviewChecks.some((c) => c.field_key === "font_size") && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <p className="font-bold">Font-size measurement</p>
+          <p className="mt-1">Barcode reference calibration verified at {String(scan.calibration_data.mm_per_px_y)} mm/px. The declaration text bounding box was not localized reliably, so the physical font height is <strong>not measurable for this scan</strong>; no font-size pass/fail decision was fabricated.</p>
         </div>
       )}
 
@@ -503,7 +538,7 @@ export default function ScanDetailPage() {
                           ? <span className="text-xs font-bold text-red-600">Mandatory</span>
                           : <span className="text-xs text-gray-400">Optional</span>}
                       </td>
-                      <td className="table-td text-xs font-mono text-gray-500">{row.extracted_value || "—"}</td>
+                      <td className="table-td text-xs font-mono text-gray-500">{row.extracted_value || (row.key === "font_size" && row.notes ? row.notes.match(/Measured physical text height: [^;]+/)?.[0] : null) || "—"}</td>
                       <td className="table-td">
                         {row.result === "ManualReviewRequired"
                           ? <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-100 px-2 py-1 text-[10px] font-semibold text-amber-800">⚠ Manual Review</span>
@@ -511,6 +546,8 @@ export default function ScanDetailPage() {
                           ? <span className="inline-flex items-center rounded-full border border-gray-300 bg-gray-100 px-2 py-1 text-[10px] font-semibold text-gray-600">— Not Applicable</span>
                           : row.present
                           ? <span className="badge-pass text-[10px]">✓ Found</span>
+                          : row.result === "Fail"
+                          ? <span className="badge-fail text-[10px]">✗ Below minimum</span>
                           : <span className="badge-fail text-[10px]">✗ Missing</span>}
                       </td>
                     </tr>

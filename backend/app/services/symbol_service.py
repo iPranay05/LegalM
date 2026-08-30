@@ -129,7 +129,7 @@ def detect_symbols(image_bytes: bytes, category: str = "general") -> dict:
 
         # ── Green dot detection (Veg) ─────────────────────────────────────────
         # Phone glare and print on white can desaturate the green mark.
-        lower_green = np.array([30, 35, 45])
+        lower_green = np.array([20, 20, 25])
         upper_green = np.array([95, 255, 255])
         green_mask = cv2.inRange(hsv, lower_green, upper_green)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -153,7 +153,13 @@ def detect_symbols(image_bytes: bytes, category: str = "general") -> dict:
                 x, y, w0, h0 = cv2.boundingRect(contour)
                 if 20 <= w0 <= 260 and 20 <= h0 <= 260 and 0.55 <= w0 / max(h0, 1) <= 1.8:
                     inner = hsv[y + h0 // 5:y + 4 * h0 // 5, x + w0 // 5:x + 4 * w0 // 5]
-                    if inner.size and ((inner[:, :, 1] < 80) & (inner[:, :, 2] > 150)).mean() > 0.18:
+                    white_center = inner.size and ((inner[:, :, 1] < 80) & (inner[:, :, 2] > 150)).mean() > 0.18
+                    # Low-light photos can make the white square merge into
+                    # the package background. A compact, near-square green
+                    # component of sufficient area is still a valid mark
+                    # candidate; avoid tiny green lettering/noise.
+                    compact_mark = cv2.contourArea(contour) >= 150 and 0.75 <= w0 / max(h0, 1) <= 1.35
+                    if white_center or compact_mark:
                         result["veg_dot"] = True
                         result["veg_confidence"] = 0.65
                         break

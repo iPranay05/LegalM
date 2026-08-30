@@ -76,16 +76,47 @@ def _detect_a4_reference(bgr_image) -> Optional[dict]:
         import numpy as np
         gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 50, 150)
+        edges = cv2.Canny(blurred, 30, 120)
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Find largest rectangle-like contour
+        # If the white sheet has no dark outer edge, its light/dark boundary
+        # is more reliably found from a brightness mask. Try both paths.
+        mask = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)[1]
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+        mask_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = list(contours) + list(mask_contours)
+
+        # Find largest rectangle-like contour. Require a substantial sheet,
+        # but allow perspective and rounded/shadowed edges.
         candidates = []
+        image_area = float(bgr_image.shape[0] * bgr_image.shape[1])
         for c in contours:
             peri = cv2.arcLength(c, True)
-            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-            if len(approx) == 4 and cv2.contourArea(c) > 10000:
+            approx = cv2.approxPolyDP(c, 0.035 * peri, True)
+            area = cv2.contourArea(c)
+            if len(approx) == 4 and area > max(10000, image_area * 0.15):
                 candidates.append((cv2.contourArea(c), approx))
+
+        # Phone photos commonly have a white sheet whose boundary is partly
+        # outside the frame or broken by shadows. Recover its measured extent
+        # from the largest bright contour when a clean four-corner contour is
+        # unavailable, while still requiring an A4-like aspect ratio.
+        if not candidates:
+            bright = cv2.threshold(gray, 145, 255, cv2.THRESH_BINARY)[1]
+            bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8))
+            bright_contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in sorted(bright_contours, key=cv2.contourArea, reverse=True):
+                area = cv2.contourArea(contour)
+                if area < image_area * 0.25:
+                    continue
+                _, (rw, rh), _ = cv2.minAreaRect(contour)
+                if min(rw, rh) <= 0:
+                    continue
+                ratio = max(rw, rh) / min(rw, rh)
+                if 1.10 <= ratio <= 2.00:
+                    rect = cv2.boxPoints(cv2.minAreaRect(contour)).astype(float)
+                    candidates.append((area, rect.reshape(4, 1, 2)))
+                    break
 
         if not candidates:
             return None

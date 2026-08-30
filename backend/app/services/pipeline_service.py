@@ -191,6 +191,7 @@ def run_pipeline_sync(image_bytes: bytes,
         "image_index": image_index,
         "overall_confidence": ocr_confidence,
         "low_confidence": ocr_low,
+        "image_height_px": __import__("PIL.Image", fromlist=["Image"]).open(__import__("io").BytesIO(image_bytes)).height,
         "db": db,
         "manufacturer_id": manufacturer_id,
         "product_id": product_id,
@@ -210,6 +211,7 @@ def run_pipeline_sync(image_bytes: bytes,
         "raw_ocr_text": raw_text,
         "ocr_confidence": ocr_confidence,
         "ocr_language": ocr.get("language", "eng"),
+        "image_height_px": __import__("PIL.Image", fromlist=["Image"]).open(__import__("io").BytesIO(image_bytes)).height,
         "calibration_method": calibration["method"],
         "calibration_data": calibration,
         "symbols_detected": symbols,
@@ -311,6 +313,7 @@ def _merge_pipeline_results(results: list[dict], category: str, db=None,
         # field found confidently on another photo. The classifier already
         # applies confidence gating per declaration.
         "low_confidence": confidence < 60.0,
+        "image_height_px": results[0].get("image_height_px"),
         "db": db,
         "product_id": product_id,
     })
@@ -332,6 +335,7 @@ def _merge_pipeline_results(results: list[dict], category: str, db=None,
         "ocr_confidence": confidence,
         "groq_used": any(r.get("groq_used") for r in results),
         "symbols_detected": symbols,
+        "calibration_method": calibration.get("method", "unverified"),
         "calibration_data": calibration,
         "bounding_boxes": all_boxes,
         "is_compliant": compliance["is_compliant"],
@@ -389,6 +393,8 @@ def run_pipeline_task(self, scan_id: str, image_path: str | list[str], category:
 
         # Extract product_name if missing
         extracted = result.get("extracted_fields") or {}
+        barcode_data = result.get("barcode_data") or {}
+        detected_barcode = barcode_data.get("primary_barcode") or extracted.get("barcode_number")
         product_name = scan.product_name or extracted.get("product_name")
         if not product_name:
             raw_text = result.get("raw_ocr_text", "")
@@ -446,6 +452,7 @@ def run_pipeline_task(self, scan_id: str, image_path: str | list[str], category:
                     is_compliant=scan.is_compliant,
                     last_compliance_score=scan.compliance_score,
                     last_scan_id=scan.scan_id,
+                    barcode=str(detected_barcode) if detected_barcode else None,
                 )
                 db.add(prod)
                 db.flush()
@@ -453,6 +460,8 @@ def run_pipeline_task(self, scan_id: str, image_path: str | list[str], category:
                 prod.last_compliance_score = scan.compliance_score
                 prod.last_scan_id = scan.scan_id
                 prod.is_compliant = scan.is_compliant
+                if detected_barcode:
+                    prod.barcode = str(detected_barcode)
                 if cat_id and not prod.commodity_category_id:
                     prod.commodity_category_id = cat_id
             scan.product_id = prod.id

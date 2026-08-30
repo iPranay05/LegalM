@@ -424,16 +424,29 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
                     else:
                         mm_per_px_y = calibration.get("mm_per_px_y")
                         bboxes = scan_context.get("bounding_boxes") or []
+                        # The pipeline supplies normalized field locations as a
+                        # field-keyed mapping. Accept that canonical form for
+                        # font measurement instead of treating it as absent.
+                        if not bboxes:
+                            bboxes = [{"field": key, "bbox": value}
+                                      for key, value in (scan_context.get("field_bboxes") or {}).items()
+                                      if value]
                         if not isinstance(mm_per_px_y, (int, float)) or mm_per_px_y <= 0 or not bboxes:
                             result = "ManualReviewRequired"
                             notes = "Calibration lacks a measured scale or localized text; officer review required."
                             mm_per_px_y = None
                         else:
                             font_pass = True
+                            measured_heights_mm = []
                             for b in bboxes:
                                 raw_bbox = b.get("bbox") if isinstance(b, dict) else None
                                 if isinstance(raw_bbox, dict):
                                     h_px = float(raw_bbox.get("y_max", 0)) - float(raw_bbox.get("y_min", 0))
+                                    # Vision/OCR boxes are normalized when their
+                                    # coordinates are in the 0..1 range.
+                                    image_height = scan_context.get("image_height_px")
+                                    if image_height and h_px <= 1:
+                                        h_px *= float(image_height)
                                 elif isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) >= 4:
                                     h_px = float(raw_bbox[3])
                                 else:
@@ -441,14 +454,17 @@ def evaluate_declarations(scan_context: dict) -> list[ComplianceCheckResult]:
                                     notes = "Font declaration has no genuine localized bounding box; officer review required."
                                     font_pass = None
                                     break
-                                if h_px * mm_per_px_y < 1.0:
+                                measured_mm = h_px * mm_per_px_y
+                                measured_heights_mm.append(measured_mm)
+                                if measured_mm < 1.0:
                                     font_pass = False
                                     break
                             if font_pass is True:
                                 result = "Pass"
+                                notes = "Measured physical text height: %.2f mm (minimum 1.00 mm)." % min(measured_heights_mm)
                             elif font_pass is False:
                                 result = "Fail"
-                                notes = "Font size below minimum prescribed height under Rule 7."
+                                notes = "Measured physical text height: %.2f mm (minimum 1.00 mm); below minimum under Rule 7." % min(measured_heights_mm or [0.0])
 
             # ── CheckType: StandardSize ──────────────────────────────────────
             elif check_type == "StandardSize":

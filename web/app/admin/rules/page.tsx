@@ -12,10 +12,12 @@ export default function RulesPage() {
   const [loading, setLoading] = useState(true);
   const [includeRetired, setIncludeRetired] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [editingRule, setEditingRule] = useState<Rule | null>(null);
   const [retiring, setRetiring] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [form, setForm] = useState({
     code: "", title: "", description: "", legal_reference: "",
+    effective_from: new Date().toISOString().slice(0, 10),
     is_mandatory: true, is_conduct_bucket: false, weight: 10,
     category_scope: [] as string[],
   });
@@ -42,12 +44,27 @@ export default function RulesPage() {
     e.preventDefault();
     setError("");
     try {
-      await api.post("/admin/rules", form);
+      if (editingRule) {
+        await api.patch(`/admin/rules/${editingRule.id}`, {
+          ...form,
+          check_type: editingRule.check_type,
+        });
+      } else {
+        await api.post("/admin/rules", form);
+      }
       setShowForm(false);
+      setEditingRule(null);
       fetchRules();
     } catch (err: any) {
       setError(err?.response?.data?.detail || "Failed to create rule");
     }
+  }
+
+  function beginEdit(rule: Rule) {
+    setEditingRule(rule);
+    setForm({ code: rule.code, title: rule.title, description: rule.description || "", legal_reference: rule.legal_reference || "", effective_from: rule.effective_from,
+      is_mandatory: rule.is_mandatory, is_conduct_bucket: rule.is_conduct_bucket, weight: rule.weight, category_scope: rule.category_scope || [] });
+    setShowForm(true);
   }
 
   async function handleRetire(ruleId: number) {
@@ -89,7 +106,7 @@ export default function RulesPage() {
             <input type="checkbox" checked={includeRetired} onChange={(e) => setIncludeRetired(e.target.checked)} className="accent-gov-navy" />
             Show retired
           </label>
-          <button onClick={() => setShowForm(!showForm)} className="gov-btn">
+          <button onClick={() => { setEditingRule(null); setShowForm(!showForm); }} className="gov-btn">
             {showForm ? "Cancel" : "+ Create Rule"}
           </button>
         </div>
@@ -100,7 +117,7 @@ export default function RulesPage() {
       {/* Create form */}
       {showForm && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-          <h2 className="font-bold text-gray-800 mb-4">Create New Rule</h2>
+          <h2 className="font-bold text-gray-800 mb-4">{editingRule ? `Edit Rule (creates new version of ${editingRule.code})` : "Create New Rule"}</h2>
           <form onSubmit={handleCreate} className="grid grid-cols-2 gap-4">
             <div>
               <label className="form-label">Rule Code * <span className="text-gray-400 font-normal">(e.g. LM-PC-R6-01)</span></label>
@@ -121,6 +138,11 @@ export default function RulesPage() {
             <div className="col-span-2">
               <label className="form-label">Legal Reference</label>
               <input value={form.legal_reference} onChange={(e) => setForm(f => ({ ...f, legal_reference: e.target.value }))} className="form-input" placeholder="e.g. Rule 6(1)(a), LM(PC) Rules 2011" />
+            </div>
+            <div>
+              <label className="form-label">Effective From *</label>
+              <input required type="date" value={form.effective_from} onChange={(e) => setForm(f => ({ ...f, effective_from: e.target.value }))} className="form-input" />
+              {editingRule && <p className="text-xs text-gray-400 mt-1">The new version applies only on or after this date.</p>}
             </div>
             <div className="col-span-2">
               <label className="form-label">Category Scope <span className="text-gray-400 font-normal">(leave empty = applies to all)</span></label>
@@ -147,7 +169,7 @@ export default function RulesPage() {
               </label>
             </div>
             <div className="col-span-2">
-              <button type="submit" className="gov-btn">Create Rule</button>
+              <button type="submit" className="gov-btn">{editingRule ? "Save New Version" : "Create Rule"}</button>
             </div>
           </form>
         </div>
@@ -192,12 +214,13 @@ export default function RulesPage() {
                     : <span className="badge-neutral text-[10px]">Retired {r.retired_at ? formatDate(r.retired_at, "dd MMM yyyy") : ""}</span>}
                 </td>
                 <td className="table-td">
-                  {r.is_active && (
+                  {r.is_active && (<>
+                    <button onClick={() => beginEdit(r)} className="text-xs text-gov-navy hover:underline font-semibold mr-3">Edit</button>
                     <button onClick={() => handleRetire(r.id)} disabled={retiring === r.id}
                       className="text-xs text-red-600 hover:underline font-semibold disabled:opacity-50">
                       {retiring === r.id ? "Retiring…" : "Retire"}
                     </button>
-                  )}
+                  </>)}
                 </td>
               </tr>
             ))}

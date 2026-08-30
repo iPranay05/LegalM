@@ -190,6 +190,18 @@ def extract_text_from_bytes(image_bytes: bytes) -> dict:
         field_confidences = groq_result.get("field_confidences", {}) if isinstance(groq_result, dict) else {}
         field_bboxes = groq_result.get("field_bboxes", {}) if isinstance(groq_result, dict) else {}
         if groq_fields:
+            # Vision models can transcribe a field without returning a usable
+            # location. Run local word-box OCR as a localization-only fallback;
+            # never replace the more accurate Vision value with its text.
+            local_boxes = {}
+            try:
+                local_result = _tesseract_extract(image_bytes)
+                local_boxes = local_result.get("field_bboxes") or {}
+            except Exception:
+                logger.debug("Local OCR localization fallback unavailable", exc_info=True)
+            for key, bbox in local_boxes.items():
+                if not field_bboxes.get(key) and bbox:
+                    field_bboxes[key] = bbox
             text_lines = []
             for key, val in groq_fields.items():
                 if val:
