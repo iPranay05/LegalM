@@ -9,7 +9,7 @@ export default function Index() {
     (async () => {
       const authed = await isAuthenticated();
       if (authed) {
-        router.replace("/(tabs)/scan");
+        router.replace("/(tabs)/dashboard");
       } else {
         router.replace("/(auth)/login");
       }

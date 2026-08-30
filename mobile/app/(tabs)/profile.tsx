@@ -1,202 +1,144 @@
-import React, { useState, useEffect } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-  Alert,
-} from "react-native";
-import { useRouter } from "expo-router";
-import GovHeader from "../../components/GovHeader";
-import { Colors } from "../../components/Colors";
-import { getStoredUser, logout, User } from "../../lib/auth";
+import React, { useCallback, useState } from "react";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, ActivityIndicator } from "react-native";
+import { useRouter, useFocusEffect } from "expo-router";
+import { SafeAreaView } from "react-native-safe-area-context";
+import Card from "../../components/Card";
+import api from "../../lib/api";
+import { getStoredUser, logout } from "../../lib/auth";
+import { Colors, Type, Radius } from "../../lib/theme";
+import { User } from "../../lib/types";
+
+const isAdminRole = (role?: string) => role === "Controller" || role === "Analyst";
 
 export default function ProfileScreen() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
+  const [adminCounts, setAdminCounts] = useState<{ rules: number; users: number } | null>(null);
+  const [loadingAdmin, setLoadingAdmin] = useState(false);
 
-  useEffect(() => {
+  useFocusEffect(useCallback(() => {
     getStoredUser().then(setUser);
-  }, []);
+  }, []));
 
-  async function handleLogout() {
-    Alert.alert("Logout", "Are you sure you want to log out?", [
+  useFocusEffect(useCallback(() => {
+    if (!isAdminRole(user?.role)) return;
+    setLoadingAdmin(true);
+    Promise.all([
+      api.get("/admin/rules").catch(() => ({ data: [] })),
+      api.get("/admin/users").catch(() => ({ data: [] })),
+    ]).then(([rulesRes, usersRes]) => {
+      setAdminCounts({ rules: rulesRes.data.length, users: usersRes.data.length });
+    }).finally(() => setLoadingAdmin(false));
+  }, [user?.role]));
+
+  function handleLogout() {
+    Alert.alert("Log Out", "Are you sure you want to log out?", [
       { text: "Cancel", style: "cancel" },
       {
-        text: "Logout",
-        style: "destructive",
-        onPress: async () => {
-          await logout();
-          router.replace("/(auth)/login");
-        },
+        text: "Log Out", style: "destructive",
+        onPress: async () => { await logout(); router.replace("/(auth)/login"); },
       },
     ]);
   }
 
-  const infoRows = [
-    { label: "Name", value: user?.name || "—" },
-    { label: "Email", value: user?.email || "—" },
-    { label: "Role", value: user?.role === "admin" ? "Administrator" : "Field Inspector" },
-    { label: "District", value: user?.district || "Not set" },
-    { label: "State", value: user?.state || "Not set" },
-  ];
-
   return (
     <View style={styles.container}>
-      <GovHeader title="Inspector Profile" />
+      <SafeAreaView edges={["top"]} style={styles.headerSafe}>
+        <Text style={styles.headerTitle}>Profile</Text>
+      </SafeAreaView>
+
       <ScrollView contentContainerStyle={styles.scroll}>
-        {/* Avatar */}
         <View style={styles.avatarSection}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>
-              {user?.name?.charAt(0)?.toUpperCase() || "?"}
-            </Text>
-          </View>
-          <Text style={styles.avatarName}>{user?.name || "Inspector"}</Text>
-          <View style={styles.roleBadge}>
-            <Text style={styles.roleBadgeText}>
-              {user?.role === "admin" ? "⭐ Admin" : "🔍 Field Inspector"}
-            </Text>
-          </View>
+          <View style={styles.avatar}><Text style={styles.avatarInitial}>{(user?.name || "U").charAt(0).toUpperCase()}</Text></View>
+          <Text style={styles.name}>{user?.name || "—"}</Text>
+          <Text style={styles.email}>{user?.email || ""}</Text>
+          <View style={styles.roleBadge}><Text style={styles.roleBadgeText}>{user?.role || "Inspector"}</Text></View>
         </View>
 
-        {/* Info card */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Account Details</Text>
-          {infoRows.map((row) => (
-            <View key={row.label} style={styles.infoRow}>
-              <Text style={styles.infoLabel}>{row.label}</Text>
-              <Text style={styles.infoValue}>{row.value}</Text>
-            </View>
-          ))}
-        </View>
+        <Text style={styles.sectionTitle}>Account Details</Text>
+        <Card style={{ marginBottom: 20 }}>
+          <InfoRow label="Full Name" value={user?.name || "—"} />
+          <InfoRow label="Email" value={user?.email || "—"} />
+          <InfoRow label="Role" value={user?.role || "—"} />
+          {user?.district ? <InfoRow label="District" value={user.district} /> : null}
+          {user?.state ? <InfoRow label="State" value={user.state} last /> : null}
+        </Card>
 
-        {/* Department info */}
-        <View style={styles.deptCard}>
-          <Text style={styles.deptTitle}>Department</Text>
-          <Text style={styles.deptText}>
-            Legal Metrology Division{"\n"}
-            Ministry of Consumer Affairs,{"\n"}
-            Food & Public Distribution{"\n"}
-            Government of India
-          </Text>
-        </View>
+        {isAdminRole(user?.role) && (
+          <>
+            <Text style={styles.sectionTitle}>Admin</Text>
+            <Card style={{ marginBottom: 20 }}>
+              {loadingAdmin ? (
+                <ActivityIndicator color={Colors.primary} />
+              ) : (
+                <>
+                  <InfoRow label="Compliance Rules Configured" value={String(adminCounts?.rules ?? "—")} />
+                  <InfoRow label="Registered Users" value={String(adminCounts?.users ?? "—")} last />
+                  <Text style={styles.adminNote}>
+                    Full rule editing, relaxation orders and user management are data-heavy desktop workflows —
+                    use the LegalM web console (same backend, same data) for those.
+                  </Text>
+                </>
+              )}
+            </Card>
+          </>
+        )}
 
-        {/* Legal reference */}
-        <View style={styles.legalCard}>
-          <Text style={styles.legalTitle}>Reference Legislation</Text>
-          <Text style={styles.legalItem}>• Legal Metrology Act, 2009</Text>
-          <Text style={styles.legalItem}>• Legal Metrology (Packaged Commodities) Rules, 2011</Text>
-          <Text style={styles.legalItem}>• Consumer Protection Act, 2019</Text>
-        </View>
+        <Text style={styles.sectionTitle}>App</Text>
+        <Card padded={false} style={{ marginBottom: 24, overflow: "hidden" }}>
+          <MenuRow label="About LegalM" icon="ℹ️" onPress={() => Alert.alert("LegalM", "Legal Metrology Compliance Portal\nMinistry of Consumer Affairs, Food & Public Distribution")} />
+          <MenuRow label="Data & Backend Status" icon="🛰" onPress={() => Alert.alert("Backend", "Connected to the shared LegalM API — same backend, OCR/ML pipeline and database as the web app.")} last />
+        </Card>
 
-        {/* Logout */}
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
-          <Text style={styles.logoutText}>🚪  Logout</Text>
+          <Text style={styles.logoutText}>Log Out</Text>
         </TouchableOpacity>
-
-        <Text style={styles.version}>LM Compliance App v1.0.0 · SIH 2026</Text>
       </ScrollView>
     </View>
   );
 }
 
+function InfoRow({ label, value, last }: { label: string; value: string; last?: boolean }) {
+  return (
+    <View style={[styles.infoRow, !last && styles.infoRowBorder]}>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <Text style={styles.infoValue}>{value}</Text>
+    </View>
+  );
+}
+
+function MenuRow({ label, icon, onPress, last }: { label: string; icon: string; onPress: () => void; last?: boolean }) {
+  return (
+    <TouchableOpacity style={[styles.menuRow, !last && styles.infoRowBorder]} onPress={onPress} activeOpacity={0.7}>
+      <Text style={styles.menuIcon}>{icon}</Text>
+      <Text style={styles.menuLabel}>{label}</Text>
+      <Text style={styles.menuArrow}>›</Text>
+    </TouchableOpacity>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
+  headerSafe: { backgroundColor: Colors.background },
+  headerTitle: { ...Type.headlineLg, color: Colors.onSurface, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4 },
   scroll: { padding: 16, paddingBottom: 40 },
-  avatarSection: {
-    alignItems: "center",
-    paddingVertical: 24,
-    gap: 8,
-  },
-  avatar: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: Colors.primary,
-    alignItems: "center",
-    justifyContent: "center",
-    elevation: 4,
-    shadowColor: Colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-  },
-  avatarText: { fontSize: 32, color: Colors.white, fontWeight: "800" },
-  avatarName: { fontSize: 20, fontWeight: "700", color: Colors.text },
-  roleBadge: {
-    backgroundColor: Colors.primaryLight,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 20,
-  },
-  roleBadgeText: { fontSize: 12, fontWeight: "700", color: Colors.primary },
-  card: {
-    backgroundColor: Colors.white,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-  },
-  cardTitle: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: Colors.text,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    marginBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-    paddingBottom: 8,
-  },
-  infoRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingVertical: 9,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-  },
-  infoLabel: { fontSize: 13, color: Colors.textSecondary },
-  infoValue: { fontSize: 13, fontWeight: "600", color: Colors.text },
-  deptCard: {
-    backgroundColor: Colors.primaryLight,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    borderLeftWidth: 4,
-    borderLeftColor: Colors.primary,
-  },
-  deptTitle: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: Colors.primary,
-    textTransform: "uppercase",
-    marginBottom: 8,
-  },
-  deptText: { fontSize: 13, color: Colors.text, lineHeight: 22 },
-  legalCard: {
-    backgroundColor: Colors.white,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 20,
-    gap: 4,
-  },
-  legalTitle: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: Colors.textSecondary,
-    textTransform: "uppercase",
-    marginBottom: 8,
-  },
-  legalItem: { fontSize: 12, color: Colors.text, lineHeight: 20 },
-  logoutBtn: {
-    borderWidth: 2,
-    borderColor: Colors.danger,
-    borderRadius: 10,
-    paddingVertical: 14,
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  logoutText: { fontSize: 15, fontWeight: "700", color: Colors.danger },
-  version: { textAlign: "center", fontSize: 11, color: Colors.textMuted },
+  avatarSection: { alignItems: "center", paddingVertical: 20 },
+  avatar: { width: 76, height: 76, borderRadius: 38, backgroundColor: Colors.primary, alignItems: "center", justifyContent: "center", marginBottom: 12 },
+  avatarInitial: { color: Colors.onPrimary, fontSize: 30, fontWeight: "700" },
+  name: { ...Type.headlineMd, color: Colors.onSurface },
+  email: { fontSize: 13, color: Colors.onSurfaceVariant, marginTop: 2 },
+  roleBadge: { backgroundColor: Colors.surfaceContainerHigh, borderRadius: Radius.full, paddingHorizontal: 12, paddingVertical: 5, marginTop: 10 },
+  roleBadgeText: { fontSize: 11, fontWeight: "700", color: Colors.onSurface },
+  sectionTitle: { ...Type.labelCaps, fontSize: 11, color: Colors.onSurfaceVariant, marginBottom: 10, marginTop: 4 },
+  infoRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 11 },
+  infoRowBorder: { borderBottomWidth: 1, borderBottomColor: Colors.borderSubtle },
+  infoLabel: { fontSize: 13, color: Colors.onSurfaceVariant },
+  infoValue: { fontSize: 13, color: Colors.onSurface, fontWeight: "600" },
+  adminNote: { fontSize: 11.5, color: Colors.onSurfaceMuted, lineHeight: 16, marginTop: 12 },
+  menuRow: { flexDirection: "row", alignItems: "center", padding: 14, gap: 12 },
+  menuIcon: { fontSize: 16 },
+  menuLabel: { flex: 1, fontSize: 14, color: Colors.onSurface, fontWeight: "600" },
+  menuArrow: { fontSize: 18, color: Colors.onSurfaceMuted },
+  logoutBtn: { borderWidth: 1.5, borderColor: Colors.statusFail, borderRadius: Radius.md, paddingVertical: 14, alignItems: "center" },
+  logoutText: { color: Colors.statusFail, fontWeight: "700", fontSize: 14 },
 });

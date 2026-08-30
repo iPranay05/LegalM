@@ -1,14 +1,9 @@
 import * as SecureStore from "expo-secure-store";
 import api from "./api";
+import { User } from "./types";
 
-export interface User {
-  id: number;
-  name: string;
-  email: string;
-  role: string;
-  district?: string;
-  state?: string;
-}
+// Talks to the existing LegalM /auth/* endpoints — identical contract to the
+// web app's lib/api.ts + localStorage session. No separate mobile auth system.
 
 export async function login(email: string, password: string): Promise<User> {
   const res = await api.post("/auth/login", { email, password });

@@ -1,799 +1,647 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  View, Text, ScrollView, TouchableOpacity, StyleSheet,
-  Share, Alert, ActivityIndicator, TextInput, Modal,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, ActivityIndicator,
+  Modal, Dimensions, Alert, FlatList, TextInput,
 } from "react-native";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Colors } from "../components/Colors";
-import ComplianceBadge from "../components/ComplianceBadge";
-import FieldRow from "../components/FieldRow";
-import api from "../lib/api";
-import {
-  ComplianceResult, ScanResultTabs, ManualFinding,
-  FIELD_LABELS, SEVERITY_COLORS,
-} from "../lib/types";
+// expo-file-system v19 (SDK 54) deprecated cacheDirectory/downloadAsync in
+// favor of the new File/Directory API. The legacy import keeps the same
+// function-based API this screen (and downloadReport below) relies on.
+import * as FileSystem from "expo-file-system/legacy";
+import * as SecureStore from "expo-secure-store";
+import Card from "../components/Card";
+import StatusBadge from "../components/StatusBadge";
+import ScoreRing from "../components/ScoreRing";
+import EmptyState from "../components/EmptyState";
+import api, { API_BASE_URL } from "../lib/api";
+import { Colors, Type, Radius, statusColor } from "../lib/theme";
+import { ScanResultTabs, FieldTabEntry, ManualFinding, Report } from "../lib/types";
+import { formatDate, scanStatus, statusLabel } from "../lib/format";
 
-type Tab = "all" | "violations" | "relaxed" | "findings";
+const SCREEN_W = Dimensions.get("window").width;
+const POLL_INTERVAL_MS = 3000;
+const PROCESSING_STATUSES = ["pending", "processing"];
 
-const REQUIRED_FIELDS = new Set([
-  "manufacturer_info", "product_name", "net_quantity", "mfg_date", "mrp", "consumer_care",
-]);
+type TabKey = "all" | "violations" | "relaxed" | "manual";
+
+function imgUrl(path?: string) {
+  if (!path) return undefined;
+  if (path.startsWith("http")) return path;
+  const clean = path.startsWith("/") ? path : `/${path}`;
+  return `${API_BASE_URL}${clean}`;
+}
 
 export default function ResultScreen() {
+  const { scan_id } = useLocalSearchParams<{ scan_id: string }>();
   const router = useRouter();
-  const { data, scan_id: paramScanId } = useLocalSearchParams<{ data?: string; scan_id?: string }>();
-  const [activeTab, setActiveTab] = useState<Tab>("all");
-  const [showOcr, setShowOcr] = useState(false);
-  const [tabs, setTabs] = useState<ScanResultTabs | null>(null);
-  const [loadingTabs, setLoadingTabs] = useState(false);
-  const [showFindingForm, setShowFindingForm] = useState(false);
-  const [submittingFinding, setSubmittingFinding] = useState(false);
-  const [findingForm, setFindingForm] = useState({
-    rule_code: "",
-    finding_type: "violation" as "violation" | "observation" | "compliant",
-    description: "",
-    severity: "medium" as "low" | "medium" | "high" | "critical",
-  });
 
-  const parsedInitial = data ? (() => { try { return JSON.parse(data); } catch { return null; } })() : null;
-  const [result, setResult] = useState<ComplianceResult | null>(parsedInitial);
-  const effectiveScanId = paramScanId || parsedInitial?.scan_id;
-  const [pipelineStatus, setPipelineStatus] = useState<string>(parsedInitial?.pipeline_status || "pending");
+  const [pipelineStatus, setPipelineStatus] = useState<string>("pending");
+  const [data, setData] = useState<ScanResultTabs | null>(null);
+  const [reports, setReports] = useState<Report[]>([]);
+  const [error, setError] = useState("");
+  const [tab, setTab] = useState<TabKey>("all");
+  const [imageIndex, setImageIndex] = useState(0);
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const [viewerField, setViewerField] = useState<FieldTabEntry | null>(null);
+  const [reportBusy, setReportBusy] = useState<string | null>(null);
+  const [findingModal, setFindingModal] = useState(false);
+  const [findingText, setFindingText] = useState("");
+  const [findingBusy, setFindingBusy] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchStatus = useCallback(async () => {
+    if (!scan_id) return;
+    try {
+      const res = await api.get(`/scan/${scan_id}/status`);
+      setPipelineStatus(res.data.pipeline_status);
+      return res.data.pipeline_status as string;
+    } catch (e: any) {
+      if (e?.response?.status === 404) setError("Scan not found.");
+      return "failed";
+    }
+  }, [scan_id]);
+
+  const fetchResult = useCallback(async () => {
+    if (!scan_id) return;
+    try {
+      const [resultRes, reportsRes] = await Promise.all([
+        api.get<ScanResultTabs>(`/scan/${scan_id}/result-tabs`),
+        api.get<Report[]>(`/reports/scan/${scan_id}`).catch(() => ({ data: [] as Report[] })),
+      ]);
+      setData(resultRes.data);
+      setReports(reportsRes.data);
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Failed to load compliance result.");
+    }
+  }, [scan_id]);
 
   useEffect(() => {
-    if (!effectiveScanId) return;
+    let cancelled = false;
 
-    let intervalId: ReturnType<typeof setInterval> | null = null;
+    async function tick() {
+      const status = await fetchStatus();
+      if (cancelled) return;
+      if (status && !PROCESSING_STATUSES.includes(status)) {
+        await fetchResult();
+        if (pollRef.current) clearInterval(pollRef.current);
+      }
+    }
 
-    async function checkStatusAndFetch() {
+    tick();
+    pollRef.current = setInterval(tick, POLL_INTERVAL_MS);
+    return () => { cancelled = true; if (pollRef.current) clearInterval(pollRef.current); };
+  }, [fetchStatus, fetchResult]);
+
+  const isProcessing = PROCESSING_STATUSES.includes(pipelineStatus) && !data;
+
+  async function generateReport(fmt: "pdf" | "docx") {
+    if (!scan_id) return;
+    setReportBusy(fmt);
+    try {
+      const res = await api.post(`/reports/generate/${scan_id}`, null, { params: { fmt } });
+      setReports((prev) => [res.data, ...prev]);
+      await downloadReport(res.data, fmt);
+    } catch (e: any) {
+      Alert.alert("Report Failed", e?.response?.data?.detail || "Could not generate report.");
+    } finally {
+      setReportBusy(null);
+    }
+  }
+
+  async function downloadReport(report: Report, fmt: string) {
+    try {
+      const dest = `${FileSystem.cacheDirectory}${report.report_id}.${fmt}`;
+      // The axios instance attaches the bearer token via a request
+      // interceptor (not api.defaults.headers), so for this raw
+      // FileSystem download we read the same SecureStore token directly —
+      // same auth scheme as every other authenticated call.
+      const token = await SecureStore.getItemAsync("auth_token");
+      const downloadRes = await FileSystem.downloadAsync(
+        `${API_BASE_URL}/reports/download/${report.report_id}`,
+        dest,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+      );
       try {
-        const statusRes = await api.get<{ scan_id: string; pipeline_status: string; review_status: string }>(`/scan/${effectiveScanId}/status`);
-        const status = statusRes.data.pipeline_status;
-        setPipelineStatus(status);
-
-        if (status === "pending" || status === "processing") {
-          intervalId = setInterval(async () => {
-            try {
-              const polled = await api.get<{ scan_id: string; pipeline_status: string; review_status: string }>(`/scan/${effectiveScanId}/status`);
-              setPipelineStatus(polled.data.pipeline_status);
-              if (polled.data.pipeline_status !== "pending" && polled.data.pipeline_status !== "processing") {
-                if (intervalId) clearInterval(intervalId);
-                await loadFullResult();
-              }
-            } catch (err) {
-              // keep polling
-            }
-          }, 3000);
-        } else {
-          await loadFullResult();
+        const Sharing = await import("expo-sharing");
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(downloadRes.uri);
+          return;
         }
-      } catch (err) {
-        await loadFullResult();
-      }
+      } catch { /* expo-sharing not installed — fall through */ }
+      Alert.alert("Report Saved", `Saved to app cache:\n${downloadRes.uri}`);
+    } catch (e: any) {
+      Alert.alert("Download Failed", "Could not download the report file.");
     }
-
-    async function loadFullResult() {
-      setLoadingTabs(true);
-      try {
-        const [scanRes, tabRes] = await Promise.all([
-          api.get<ComplianceResult>(`/scan/${effectiveScanId}`),
-          api.get<ScanResultTabs>(`/scan/${effectiveScanId}/result-tabs`).catch(() => ({ data: null })),
-        ]);
-        setResult(scanRes.data);
-        setPipelineStatus(scanRes.data.pipeline_status || "complete");
-        if (tabRes.data) setTabs(tabRes.data);
-      } catch (e) {
-        // graceful
-      } finally {
-        setLoadingTabs(false);
-      }
-    }
-
-    checkStatusAndFetch();
-
-    return () => {
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [effectiveScanId]);
-
-  async function shareResult() {
-    if (!result) return;
-    const status = result.is_compliant ? "COMPLIANT ✓" : "NON-COMPLIANT ✗";
-    await Share.share({
-      message:
-        `Legal Metrology Compliance Check\n` +
-        `Scan ID: ${result.scan_id}\nStatus: ${status}\n` +
-        `Score: ${result.compliance_score?.toFixed(1) ?? 0}%\n\n` +
-        `Missing: ${result.missing_fields?.length ? result.missing_fields.join(", ") : "None"}\n\n` +
-        `Remarks: ${result.remarks || "—"}`,
-    });
   }
 
   async function submitFinding() {
-    if (!result || !findingForm.description.trim()) {
-      Alert.alert("Required", "Please enter a description for the finding.");
-      return;
-    }
-    setSubmittingFinding(true);
+    if (!scan_id || !findingText.trim()) return;
+    setFindingBusy(true);
     try {
-      await api.post(`/scan/${result.scan_id}/findings`, {
-        rule_code: findingForm.rule_code || null,
-        finding_type: findingForm.finding_type,
-        description: findingForm.description,
-        severity: findingForm.severity,
+      const res = await api.post(`/scan/${scan_id}/findings`, {
+        description: findingText.trim(),
+        finding_type: "manual_note",
+        severity: "medium",
       });
-      setShowFindingForm(false);
-      setFindingForm({ rule_code: "", finding_type: "violation", description: "", severity: "medium" });
-      const r = await api.get<ScanResultTabs>(`/scan/${result.scan_id}/result-tabs`);
-      setTabs(r.data);
-      Alert.alert("Saved", "Manual finding recorded.");
-    } catch (err: any) {
-      Alert.alert("Error", err?.response?.data?.detail || "Failed to save finding.");
+      setData((prev) => prev ? { ...prev, manual_findings: [res.data, ...prev.manual_findings] } : prev);
+      setFindingText("");
+      setFindingModal(false);
+    } catch (e: any) {
+      Alert.alert("Failed", e?.response?.data?.detail || "Could not add finding.");
     } finally {
-      setSubmittingFinding(false);
+      setFindingBusy(false);
     }
   }
 
-  async function deleteFinding(findingId: number) {
-    if (!result) return;
-    Alert.alert("Delete Finding", "Remove this finding?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete", style: "destructive",
-        onPress: async () => {
-          try {
-            await api.delete(`/scan/${result.scan_id}/findings/${findingId}`);
-            const r = await api.get<ScanResultTabs>(`/scan/${result.scan_id}/result-tabs`);
-            setTabs(r.data);
-          } catch {}
-        },
-      },
-    ]);
-  }
-
-  if (pipelineStatus === "pending" || pipelineStatus === "processing") {
+  if (error && !data) {
     return (
-      <SafeAreaView style={styles.safe}>
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={Colors.primary} />
-          <Text style={[styles.topTitle, { marginTop: 16 }]}>Processing Perception Pipeline</Text>
-          <Text style={{ color: Colors.textSecondary, textAlign: "center", paddingHorizontal: 32, fontSize: 13, marginTop: 6 }}>
-            Extracting text declarations, calibrating font size, and evaluating Legal Metrology rules in the background…
-          </Text>
-          <View style={[styles.symbolPill, styles.symbolPillOrange, { marginTop: 16 }]}>
-            <Text style={styles.symbolText}>Status: {pipelineStatus.toUpperCase()}</Text>
-          </View>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  if (!result) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.errorText}>No result data found.</Text>
-        <TouchableOpacity onPress={() => router.back()}>
-          <Text style={{ color: Colors.primary, fontWeight: "600" }}>Go Back</Text>
-        </TouchableOpacity>
+      <View style={styles.container}>
+        <TopBarSimple title="Scan Result" onBack={() => router.back()} />
+        <EmptyState icon="⚠️" title="Something went wrong" subtitle={error} />
       </View>
     );
   }
 
-  const allRules = tabs?.all_rules || Object.entries(result.field_results || {}).map(([key, present]) => ({
-    key, label: FIELD_LABELS[key] || key, required: REQUIRED_FIELDS.has(key),
-    weight: 10, present, extracted_value: result.extracted_fields?.[key],
-  }));
-  const violations = tabs?.violations || allRules.filter(r => !r.present && r.required);
-  const relaxed = tabs?.not_applicable_relaxed || allRules.filter(r => !r.present && !r.required);
-  const findings = tabs?.manual_findings || [];
+  if (isProcessing) {
+    return <ProcessingView scanId={String(scan_id)} status={pipelineStatus} onCancel={() => router.back()} />;
+  }
 
-  const tabConfig: { id: Tab; label: string; badge: number }[] = [
-    { id: "all", label: "All Rules", badge: allRules.length },
-    { id: "violations", label: "Violations", badge: violations.length },
-    { id: "relaxed", label: "N/A", badge: relaxed.length },
-    { id: "findings", label: "Findings", badge: findings.length },
-  ];
+  if (!data) {
+    return (
+      <View style={styles.container}>
+        <TopBarSimple title="Scan Result" onBack={() => router.back()} />
+        <ActivityIndicator style={{ marginTop: 40 }} color={Colors.primary} />
+      </View>
+    );
+  }
+
+  const { scan, all_rules, violations, not_applicable_relaxed, manual_findings } = data;
+  const status = scanStatus(scan);
+  const images = scan.image_paths?.length ? scan.image_paths : (scan.image_path ? [scan.image_path] : []);
+
+  const tabData: Record<TabKey, { label: string; count: number }> = {
+    all: { label: "All Rules", count: all_rules.length },
+    violations: { label: "Violations", count: violations.length },
+    relaxed: { label: "N/A / Relaxed", count: not_applicable_relaxed.length },
+    manual: { label: "Manual", count: manual_findings.length },
+  };
+
+  const activeEntries: FieldTabEntry[] = tab === "all" ? all_rules : tab === "violations" ? violations : tab === "relaxed" ? not_applicable_relaxed : [];
 
   return (
-    <SafeAreaView style={styles.safe}>
-      {/* Top bar */}
-      <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.closeBtn}>
-          <Text style={styles.closeBtnText}>✕</Text>
-        </TouchableOpacity>
-        <Text style={styles.topTitle}>Compliance Report</Text>
-        <TouchableOpacity onPress={shareResult} style={styles.shareBtn}>
-          <Text style={styles.shareBtnText}>Share</Text>
-        </TouchableOpacity>
-      </View>
+    <View style={styles.container}>
+      <Stack.Screen options={{ headerShown: false }} />
+      <TopBarSimple title={scan.product_name || "Scan Result"} subtitle={scan.scan_id} onBack={() => router.back()} />
 
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        {/* Status card */}
-        <View style={[styles.statusCard, result.is_compliant ? styles.statusCardPass : styles.statusCardFail]}>
-          <ComplianceBadge isCompliant={result.is_compliant} headline={result.compliance_summary?.headline} score={result.compliance_score} size="lg" />
-          <View style={styles.scoreBarWrap}>
-            <View style={styles.scoreBarBg}>
-              <View style={[
-                styles.scoreBarFill,
-                { width: `${Math.min(result.compliance_score || 0, 100)}%` as any },
-                result.is_compliant ? styles.scoreBarPass : styles.scoreBarFail,
-              ]} />
-            </View>
-            <Text style={styles.scoreBarLabel}>
-              {result.mandatory_fields_present || 0}/{result.total_mandatory_fields || 0} mandatory fields · {(result.compliance_score || 0).toFixed(1)}%
-            </Text>
-          </View>
-
-          {/* Symbol detection pills */}
-          {result.symbols_detected && (
-            <View style={styles.symbolRow}>
-              <View style={[styles.symbolPill, result.symbols_detected.veg_dot ? styles.symbolPillGreen : styles.symbolPillGray]}>
-                <Text style={styles.symbolText}>🟢 Veg: {result.symbols_detected.veg_dot ? "✓" : "—"}</Text>
-              </View>
-              <View style={[styles.symbolPill, result.symbols_detected.non_veg_dot ? styles.symbolPillRed : styles.symbolPillGray]}>
-                <Text style={styles.symbolText}>🔴 Non-Veg: {result.symbols_detected.non_veg_dot ? "✓" : "—"}</Text>
-              </View>
-              <View style={[styles.symbolPill, result.symbols_detected.gm_mark ? styles.symbolPillOrange : styles.symbolPillGray]}>
-                <Text style={styles.symbolText}>⚗️ GM: {result.symbols_detected.gm_mark ? "✓" : "—"}</Text>
-              </View>
-            </View>
-          )}
-
-          {/* Pipeline status badge */}
-          {result.pipeline_status === "review_needed" && (
-            <View style={styles.reviewBadge}>
-              <Text style={styles.reviewBadgeText}>⚠ Officer Review Required</Text>
-            </View>
-          )}
-        </View>
-
-        {/* Remarks */}
-        <View style={styles.remarksCard}>
-          <Text style={styles.sectionLabel}>Inspector Remarks</Text>
-          <Text style={styles.remarksText}>{result.remarks || "No remarks"}</Text>
-        </View>
-
-        {/* Meta */}
-        <View style={styles.metaCard}>
-          {[
-            { k: "Scan ID", v: result.scan_id.substring(0, 20) + "…" },
-            { k: "OCR Confidence", v: `${(result.ocr_confidence || 0).toFixed(1)}%` },
-            { k: "Fields Checked", v: String(result.total_fields_checked || 0) },
-            ...(result.calibration_method ? [{ k: "Calibration", v: result.calibration_method }] : []),
-          ].map(({ k, v }) => (
-            <View key={k} style={styles.metaRow}>
-              <Text style={styles.metaKey}>{k}</Text>
-              <Text style={styles.metaVal}>{v}</Text>
-            </View>
-          ))}
-        </View>
-
-        {/* Pipeline Intelligence: Barcode + Groq */}
-        {(result.groq_used || result.barcode_data?.decoded) && (
-          <View style={styles.intelligenceCard}>
-            <Text style={styles.sectionLabel}>Pipeline Intelligence</Text>
-
-            {/* Groq status */}
-            <View style={styles.intelRow}>
-              <Text style={styles.intelIcon}>🤖</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.intelTitle}>Groq LLM Extraction</Text>
-                <Text style={styles.intelSub}>Structured field parsing from OCR text</Text>
-              </View>
-              <View style={[styles.intelBadge, result.groq_used ? styles.intelBadgeOn : styles.intelBadgeOff]}>
-                <Text style={[styles.intelBadgeText, result.groq_used ? styles.intelBadgeTextOn : styles.intelBadgeTextOff]}>
-                  {result.groq_used ? "✓ Used" : "Off"}
-                </Text>
-              </View>
-            </View>
-
-            {/* Barcode status */}
-            <View style={[styles.intelRow, { marginTop: 10 }]}>
-              <Text style={styles.intelIcon}>📊</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.intelTitle}>Barcode Detection</Text>
-                <Text style={styles.intelSub}>
-                  {result.barcode_data?.decoded
-                    ? `${result.barcode_data.barcodes?.length ?? 0} barcode(s) detected`
-                    : "No barcodes found"}
-                </Text>
-              </View>
-              <View style={[styles.intelBadge, result.barcode_data?.decoded ? styles.intelBadgeOn : styles.intelBadgeOff]}>
-                <Text style={[styles.intelBadgeText, result.barcode_data?.decoded ? styles.intelBadgeTextOn : styles.intelBadgeTextOff]}>
-                  {result.barcode_data?.decoded ? "✓ Found" : "None"}
-                </Text>
-              </View>
-            </View>
-
-            {/* Barcode values */}
-            {result.barcode_data?.decoded && result.barcode_data.barcodes?.length > 0 && (
-              <View style={styles.barcodeList}>
-                {result.barcode_data.barcodes.map((bc, i) => (
-                  <View key={i} style={styles.barcodeRow}>
-                    <View style={styles.barcodeTypeBadge}>
-                      <Text style={styles.barcodeTypeText}>{bc.type}</Text>
-                    </View>
-                    <Text style={styles.barcodeValue} numberOfLines={1}>{bc.data}</Text>
-                    {bc.data === result.barcode_data?.primary_barcode && (
-                      <Text style={styles.barcodePrimary}>Primary</Text>
-                    )}
-                  </View>
-                ))}
-
-                {/* Open Food Facts product info */}
-                {result.barcode_data.product_info && Object.keys(result.barcode_data.product_info).length > 1 && (
-                  <View style={styles.offCard}>
-                    <Text style={styles.offTitle}>🌐 Open Food Facts</Text>
-                    {([
-                      ["Product", result.barcode_data.product_info.product_name],
-                      ["Brand", result.barcode_data.product_info.brand_name],
-                      ["Quantity", result.barcode_data.product_info.net_quantity],
-                      ["FSSAI", result.barcode_data.product_info.fssai_number],
-                      ["Country", result.barcode_data.product_info.country_of_origin],
-                    ] as [string, string | undefined][]).filter(([, v]) => v).map(([label, value]) => (
-                      <View key={label} style={styles.offRow}>
-                        <Text style={styles.offKey}>{label}</Text>
-                        <Text style={styles.offVal}>{value}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
+      <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+        {images.length > 0 && (
+          <View>
+            <FlatList
+              data={images}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              keyExtractor={(uri, i) => `${uri}-${i}`}
+              onMomentumScrollEnd={(e) => setImageIndex(Math.round(e.nativeEvent.contentOffset.x / SCREEN_W))}
+              renderItem={({ item }) => (
+                <TouchableOpacity activeOpacity={0.9} onPress={() => { setViewerField(null); setViewerOpen(true); }}>
+                  <Image source={{ uri: imgUrl(item) }} style={styles.heroImage} resizeMode="cover" />
+                </TouchableOpacity>
+              )}
+            />
+            {images.length > 1 && (
+              <View style={styles.dotsRow}>
+                {images.map((_, i) => <View key={i} style={[styles.dot, i === imageIndex && styles.dotActive]} />)}
               </View>
             )}
+            <View style={styles.zoomHint}><Text style={styles.zoomHintText}>🔍 Tap to zoom</Text></View>
           </View>
         )}
 
-        {/* Declaration Evidence & Localization */}
-        {result.bounding_boxes && result.bounding_boxes.length > 0 && (
-          <View style={styles.evidenceCard}>
-            <Text style={styles.sectionLabel}>Declaration Evidence & Localization</Text>
-            <View style={{ gap: 8, marginTop: 8 }}>
-                {result.bounding_boxes.map((b, index) => {
-                const conf = b.confidence != null ? (b.confidence > 1 ? b.confidence / 100 : b.confidence) : 0;
-                const isVision = (b as any).bbox_source === "vision_estimate" || (b.bbox && typeof b.bbox === "object" && (b.bbox as any).bbox_source === "vision_estimate");
-                const color = conf >= 0.7 ? Colors.success : (conf >= 0.4 ? Colors.warning : Colors.danger);
-                const sourceBadge = isVision ? "Vision Estimate" : "OCR Word Match";
+        <View style={styles.body}>
+          <View style={styles.statusRow}>
+            <StatusBadge status={status} />
+            <Text style={styles.dateText}>{formatDate(scan.created_at)}</Text>
+          </View>
 
-                return (
-                  <View key={`${b.field}-${b.image_index ?? 0}-${index}`} style={[styles.evidenceRow, { borderLeftColor: color, borderLeftWidth: 4 }]}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.evidenceField}>{b.field.replace(/_/g, " ").toUpperCase()}</Text>
-                      {b.text ? <Text style={styles.evidenceText} numberOfLines={2}>"{b.text}"</Text> : null}
-                      <Text style={styles.evidenceMeta}>
-                        {sourceBadge} · Confidence: {Math.round(conf * 100)}%
-                      </Text>
-                    </View>
-                    <View style={[styles.confPill, { backgroundColor: color + "20" }]}>
-                      <Text style={[styles.confPillText, { color }]}>{Math.round(conf * 100)}%</Text>
-                    </View>
-                  </View>
-                );
-              })}
+          <Text style={styles.productName}>{scan.product_name || "Unidentified Product"}</Text>
+          {scan.brand_name ? <Text style={styles.brandName}>{scan.brand_name}</Text> : null}
+
+          <Card style={styles.summaryCard}>
+            <View style={styles.summaryRow}>
+              <View style={styles.summaryScore}>
+                <ScoreRing score={scan.compliance_score ?? 0} size={84} strokeWidth={8} />
+                <Text style={styles.summaryScoreLabel}>Compliance Score</Text>
+              </View>
+              <View style={styles.summaryFields}>
+                <SummaryField label="Scan ID" value={scan.scan_id} mono />
+                <SummaryField label="Category" value={scan.category || "—"} />
+                <SummaryField label="Net Quantity" value={scan.extracted_fields?.net_quantity || "—"} />
+                <SummaryField label="MRP" value={scan.extracted_fields?.mrp || "—"} />
+                {scan.shop_name ? <SummaryField label="Shop" value={scan.shop_name} /> : null}
+              </View>
             </View>
-          </View>
-        )}
-
-        {/* Four-tab section */}
-        <View style={styles.tabSection}>
-          {/* Tab bar */}
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabBar} contentContainerStyle={styles.tabBarContent}>
-            {tabConfig.map((t) => (
-              <TouchableOpacity
-                key={t.id}
-                onPress={() => setActiveTab(t.id)}
-                style={[styles.tabBtn, activeTab === t.id && styles.tabBtnActive]}
-              >
-                <Text style={[styles.tabBtnText, activeTab === t.id && styles.tabBtnTextActive]}>
-                  {t.label}
+            {scan.compliance_summary && (
+              <View style={styles.summaryFooter}>
+                <Text style={styles.summaryFooterText}>
+                  {scan.compliance_summary.counts?.Pass ?? 0}/{scan.compliance_summary.total} rules passed
+                  {violations.length > 0 ? ` · ${violations.length} violation${violations.length > 1 ? "s" : ""}` : ""}
                 </Text>
-                {t.badge > 0 && (
-                  <View style={[styles.tabBadge, activeTab === t.id && styles.tabBadgeActive]}>
-                    <Text style={[styles.tabBadgeText, activeTab === t.id && styles.tabBadgeTextActive]}>
-                      {t.badge}
-                    </Text>
-                  </View>
-                )}
+              </View>
+            )}
+          </Card>
+
+          {scan.symbols_detected && (
+            <View style={styles.symbolsRow}>
+              <SymbolPill label="Veg Mark" ok={scan.symbols_detected.veg_dot} />
+              <SymbolPill label="Non-Veg Mark" ok={scan.symbols_detected.non_veg_dot} />
+              <SymbolPill label="GM Declaration" ok={scan.symbols_detected.gm_mark} />
+            </View>
+          )}
+
+          {scan.barcode_data?.decoded && scan.barcode_data.primary_barcode && (
+            <Card style={{ marginBottom: 16 }}>
+              <Text style={styles.cardHeading}>Barcode Data</Text>
+              <Text style={styles.mono}>{scan.barcode_data.primary_barcode}</Text>
+              {scan.barcode_data.product_info && Object.entries(scan.barcode_data.product_info).slice(0, 4).map(([k, v]) => (
+                <Text key={k} style={styles.barcodeInfoLine}>{k}: {String(v)}</Text>
+              ))}
+            </Card>
+          )}
+
+          <View style={styles.tabBar}>
+            {(Object.keys(tabData) as TabKey[]).map((key) => (
+              <TouchableOpacity key={key} style={[styles.tabBtn, tab === key && styles.tabBtnActive]} onPress={() => setTab(key)}>
+                <Text style={[styles.tabBtnText, tab === key && styles.tabBtnTextActive]}>
+                  {tabData[key].label} {tabData[key].count > 0 ? `(${tabData[key].count})` : ""}
+                </Text>
               </TouchableOpacity>
             ))}
-          </ScrollView>
-
-          {/* Loading indicator for tabs */}
-          {loadingTabs && (
-            <View style={styles.tabLoading}>
-              <ActivityIndicator size="small" color={Colors.primary} />
-              <Text style={styles.tabLoadingText}>Loading detailed results…</Text>
-            </View>
-          )}
-
-          {/* Tab: All Rules */}
-          {activeTab === "all" && !loadingTabs && (
-            <View>
-              {allRules.map((row, index) => (
-                <FieldRow
-                  key={`${row.key}-${index}`}
-                  label={row.label}
-                  present={row.present}
-                  extractedValue={row.extracted_value}
-                  required={row.required}
-                />
-              ))}
-            </View>
-          )}
-
-          {/* Tab: Violations */}
-          {activeTab === "violations" && !loadingTabs && (
-            violations.length === 0 ? (
-              <View style={styles.emptyTab}>
-                <Text style={styles.emptyTabIcon}>✅</Text>
-                <Text style={styles.emptyTabText}>No violations — all mandatory declarations present</Text>
-              </View>
-            ) : (
-              <View>
-                <View style={styles.violationHeader}>
-                  <Text style={styles.violationHeaderText}>
-                    ⚠ {violations.length} Missing Mandatory Declaration{violations.length > 1 ? "s" : ""}
-                  </Text>
-                  <Text style={styles.violationHeaderSub}>Offence under the Legal Metrology Act, 2009</Text>
-                </View>
-              {violations.map((row, index) => (
-                  <View key={`${row.key}-${index}`} style={styles.violationRow}>
-                    <View style={styles.violationDot} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.violationLabel}>{row.label}</Text>
-                      {(row as any).legal_reference && <Text style={styles.violationRef}>{(row as any).legal_reference}</Text>}
-                    </View>
-                    <Text style={styles.violationWeight}>–{row.weight}pts</Text>
-                  </View>
-                ))}
-              </View>
-            )
-          )}
-
-          {/* Tab: N/A or Relaxed */}
-          {activeTab === "relaxed" && !loadingTabs && (
-            relaxed.length === 0 ? (
-              <View style={styles.emptyTab}>
-                <Text style={styles.emptyTabText}>No optional fields absent.</Text>
-              </View>
-            ) : (
-              <View>
-              {relaxed.map((row, index) => (
-                  <View key={`${row.key}-${index}`} style={styles.relaxedRow}>
-                    <Text style={styles.relaxedLabel}>{row.label}</Text>
-                    <Text style={styles.relaxedNote}>Not present · Optional</Text>
-                  </View>
-                ))}
-              </View>
-            )
-          )}
-
-          {/* Tab: Manual Findings */}
-          {activeTab === "findings" && !loadingTabs && (
-            <View>
-              <TouchableOpacity
-                style={styles.addFindingBtn}
-                onPress={() => setShowFindingForm(true)}
-              >
-                <Text style={styles.addFindingBtnText}>+ Add Manual Finding</Text>
-              </TouchableOpacity>
-
-              {findings.length === 0 ? (
-                <View style={styles.emptyTab}>
-                  <Text style={styles.emptyTabText}>No manual findings recorded.</Text>
-                </View>
-              ) : (
-                findings.map((f) => (
-                  <View key={f.id} style={styles.findingCard}>
-                    <View style={styles.findingHeaderRow}>
-                      <View style={[styles.severityBadge, { backgroundColor: SEVERITY_COLORS[f.severity] + "22", borderColor: SEVERITY_COLORS[f.severity] + "66" }]}>
-                        <Text style={[styles.severityText, { color: SEVERITY_COLORS[f.severity] }]}>{f.severity.toUpperCase()}</Text>
-                      </View>
-                      <Text style={styles.findingType}>{f.finding_type.toUpperCase()}</Text>
-                      {f.rule_code && <Text style={styles.findingRuleCode}>{f.rule_code}</Text>}
-                      <TouchableOpacity onPress={() => deleteFinding(f.id)} style={styles.deleteBtn}>
-                        <Text style={styles.deleteBtnText}>✕</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text style={styles.findingDesc}>{f.description}</Text>
-                    {f.evidence_note && <Text style={styles.findingEvidence}>{f.evidence_note}</Text>}
-                  </View>
-                ))
-              )}
-            </View>
-          )}
-        </View>
-
-        {/* Raw OCR */}
-        <TouchableOpacity style={styles.ocrToggle} onPress={() => setShowOcr(v => !v)}>
-          <Text style={styles.ocrToggleText}>{showOcr ? "▲ Hide" : "▼ Show"} Raw OCR Text</Text>
-        </TouchableOpacity>
-        {showOcr && (
-          <View style={styles.ocrBox}>
-            <Text style={styles.ocrText}>{result.raw_ocr_text || "No text extracted."}</Text>
           </View>
-        )}
 
-        {/* New scan button */}
-        <TouchableOpacity style={styles.newScanBtn} onPress={() => router.replace("/(tabs)/scan")}>
-          <Text style={styles.newScanBtnText}>📷  Scan Another Product</Text>
-        </TouchableOpacity>
+          {tab === "manual" ? (
+            <View>
+              <TouchableOpacity style={styles.addFindingBtn} onPress={() => setFindingModal(true)}>
+                <Text style={styles.addFindingBtnText}>＋ Add Manual Finding</Text>
+              </TouchableOpacity>
+              {manual_findings.length === 0 ? (
+                <EmptyState icon="📝" title="No manual findings" subtitle="Findings recorded by inspectors during physical checks appear here." />
+              ) : manual_findings.map((f) => <ManualFindingCard key={f.id} finding={f} />)}
+            </View>
+          ) : activeEntries.length === 0 ? (
+            <EmptyState
+              icon={tab === "violations" ? "🎉" : "📄"}
+              title={tab === "violations" ? "No violations found" : "Nothing in this tab"}
+              subtitle={tab === "violations" ? "This scan passed every applicable rule." : undefined}
+            />
+          ) : (
+            activeEntries.map((entry) => (
+              <FieldEntryCard
+                key={entry.key}
+                entry={entry}
+                onViewEvidence={images.length > 0 ? () => { setViewerField(entry); setViewerOpen(true); } : undefined}
+              />
+            ))
+          )}
+
+          <View style={styles.actionsSection}>
+            <Text style={styles.cardHeading}>Report</Text>
+            <View style={styles.reportRow}>
+              <TouchableOpacity style={styles.reportBtn} onPress={() => generateReport("pdf")} disabled={!!reportBusy}>
+                {reportBusy === "pdf" ? <ActivityIndicator color={Colors.primary} size="small" /> : <Text style={styles.reportBtnText}>📄 PDF Report</Text>}
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.reportBtn} onPress={() => generateReport("docx")} disabled={!!reportBusy}>
+                {reportBusy === "docx" ? <ActivityIndicator color={Colors.primary} size="small" /> : <Text style={styles.reportBtnText}>📝 DOCX Report</Text>}
+              </TouchableOpacity>
+            </View>
+            {reports.length > 0 && (
+              <Text style={styles.reportHistoryNote}>
+                {reports.length} report{reports.length > 1 ? "s" : ""} previously generated for this scan.
+              </Text>
+            )}
+          </View>
+
+          <TouchableOpacity style={styles.scanAnotherBtn} onPress={() => router.replace("/(tabs)/scan")}>
+            <Text style={styles.scanAnotherText}>🔍  Scan Another Product</Text>
+          </TouchableOpacity>
+        </View>
       </ScrollView>
 
-      {/* Add finding modal */}
-      <Modal visible={showFindingForm} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalSheet}>
-            <Text style={styles.modalTitle}>Add Manual Finding</Text>
+      <EvidenceViewer
+        visible={viewerOpen}
+        onClose={() => setViewerOpen(false)}
+        imageUrl={imgUrl(images[imageIndex])}
+        field={viewerField}
+      />
 
-            <Text style={styles.fieldLabel}>Rule Code (optional)</Text>
+      <Modal visible={findingModal} transparent animationType="fade" onRequestClose={() => setFindingModal(false)}>
+        <View style={styles.findingOverlay}>
+          <View style={styles.findingCard}>
+            <Text style={styles.findingTitle}>Add Manual Finding</Text>
             <TextInput
-              style={styles.modalInput}
-              value={findingForm.rule_code}
-              onChangeText={(t) => setFindingForm(f => ({ ...f, rule_code: t }))}
-              placeholder="e.g. LM-PC-R6-01"
-              placeholderTextColor={Colors.textMuted}
+              style={styles.findingInput}
+              value={findingText}
+              onChangeText={setFindingText}
+              placeholder="Describe what you observed during the physical check…"
+              placeholderTextColor={Colors.onSurfaceMuted}
+              multiline
+              numberOfLines={4}
             />
-
-            <Text style={styles.fieldLabel}>Finding Type</Text>
-            <View style={styles.segmentRow}>
-              {(["violation", "observation", "compliant"] as const).map((type) => (
-                <TouchableOpacity
-                  key={type}
-                  onPress={() => setFindingForm(f => ({ ...f, finding_type: type }))}
-                  style={[styles.segmentBtn, findingForm.finding_type === type && styles.segmentBtnActive]}
-                >
-                  <Text style={[styles.segmentBtnText, findingForm.finding_type === type && styles.segmentBtnTextActive]}>
-                    {type}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <Text style={styles.fieldLabel}>Severity</Text>
-            <View style={styles.segmentRow}>
-              {(["low", "medium", "high", "critical"] as const).map((sev) => (
-                <TouchableOpacity
-                  key={sev}
-                  onPress={() => setFindingForm(f => ({ ...f, severity: sev }))}
-                  style={[styles.segmentBtn, findingForm.severity === sev && styles.segmentBtnActive]}
-                >
-                  <Text style={[styles.segmentBtnText, findingForm.severity === sev && styles.segmentBtnTextActive]}>
-                    {sev}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <Text style={styles.fieldLabel}>Description *</Text>
-            <TextInput
-              style={[styles.modalInput, styles.modalTextarea]}
-              value={findingForm.description}
-              onChangeText={(t) => setFindingForm(f => ({ ...f, description: t }))}
-              placeholder="Describe the finding in detail…"
-              placeholderTextColor={Colors.textMuted}
-              multiline numberOfLines={3}
-            />
-
-            <View style={styles.modalActions}>
-              <TouchableOpacity onPress={() => setShowFindingForm(false)} style={styles.modalCancelBtn}>
-                <Text style={styles.modalCancelText}>Cancel</Text>
+            <View style={styles.findingActions}>
+              <TouchableOpacity style={styles.findingCancel} onPress={() => setFindingModal(false)}>
+                <Text style={styles.findingCancelText}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={submitFinding} disabled={submittingFinding} style={styles.modalSaveBtn}>
-                {submittingFinding
-                  ? <ActivityIndicator size="small" color={Colors.white} />
-                  : <Text style={styles.modalSaveText}>Save Finding</Text>}
+              <TouchableOpacity style={styles.findingSubmit} onPress={submitFinding} disabled={findingBusy || !findingText.trim()}>
+                {findingBusy ? <ActivityIndicator color={Colors.onPrimary} size="small" /> : <Text style={styles.findingSubmitText}>Save</Text>}
               </TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
+    </View>
+  );
+}
+
+// ── Sub-components ──────────────────────────────────────────────────────
+
+function TopBarSimple({ title, subtitle, onBack }: { title: string; subtitle?: string; onBack: () => void }) {
+  return (
+    <SafeAreaView edges={["top"]} style={styles.topBarSafe}>
+      <View style={styles.topBarRow}>
+        <TouchableOpacity onPress={onBack} hitSlop={10} style={{ marginRight: 10 }}>
+          <Text style={styles.topBarBack}>←</Text>
+        </TouchableOpacity>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.topBarTitle} numberOfLines={1}>{title}</Text>
+          {subtitle ? <Text style={styles.topBarSubtitle} numberOfLines={1}>{subtitle}</Text> : null}
+        </View>
+      </View>
     </SafeAreaView>
   );
 }
 
+function SummaryField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <View style={styles.summaryFieldRow}>
+      <Text style={styles.summaryFieldLabel}>{label}</Text>
+      <Text style={[styles.summaryFieldValue, mono && styles.mono]} numberOfLines={1}>{value}</Text>
+    </View>
+  );
+}
+
+function SymbolPill({ label, ok }: { label: string; ok: boolean }) {
+  return (
+    <View style={[styles.symbolPill, { borderColor: ok ? Colors.statusPass : Colors.outlineVariant, backgroundColor: ok ? "rgba(16,185,129,0.08)" : Colors.surfaceContainerLow }]}>
+      <Text style={{ fontSize: 12 }}>{ok ? "✅" : "—"}</Text>
+      <Text style={[styles.symbolPillText, { color: ok ? Colors.statusPass : Colors.onSurfaceMuted }]}>{label}</Text>
+    </View>
+  );
+}
+
+function resultColor(result?: string) {
+  if (result === "Pass") return Colors.statusPass;
+  if (result === "Fail") return Colors.statusFail;
+  if (result === "ManualReviewRequired") return Colors.statusReview;
+  return Colors.onSurfaceMuted;
+}
+function resultIcon(result?: string) {
+  if (result === "Pass") return "✓";
+  if (result === "Fail") return "✕";
+  if (result === "ManualReviewRequired") return "⚠";
+  return "–";
+}
+
+function FieldEntryCard({ entry, onViewEvidence }: { entry: FieldTabEntry; onViewEvidence?: () => void }) {
+  const [expanded, setExpanded] = useState(entry.result === "Fail");
+  const color = resultColor(entry.result);
+  return (
+    <TouchableOpacity activeOpacity={0.85} onPress={() => setExpanded((v) => !v)}>
+      <Card style={[styles.fieldCard, { borderLeftWidth: 3, borderLeftColor: color }]}>
+        <View style={styles.fieldCardHeader}>
+          <View style={[styles.fieldIconWrap, { backgroundColor: color + "22" }]}>
+            <Text style={{ color, fontWeight: "800", fontSize: 13 }}>{resultIcon(entry.result)}</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.fieldLabel}>{entry.label}</Text>
+            {entry.legal_reference ? <Text style={styles.fieldRef}>{entry.legal_reference}</Text> : null}
+          </View>
+        </View>
+        {expanded && (
+          <View style={styles.fieldBody}>
+            <View style={styles.fieldValueRow}>
+              <Text style={styles.fieldValueLabel}>Detected</Text>
+              <Text style={styles.fieldValueText} numberOfLines={2}>{entry.extracted_value || "Not found"}</Text>
+            </View>
+            {entry.notes ? <Text style={styles.fieldNotes}>{entry.notes}</Text> : null}
+            {onViewEvidence && (
+              <TouchableOpacity style={styles.evidenceBtn} onPress={onViewEvidence}>
+                <Text style={styles.evidenceBtnText}>🖼  View Evidence</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+      </Card>
+    </TouchableOpacity>
+  );
+}
+
+function ManualFindingCard({ finding }: { finding: ManualFinding }) {
+  return (
+    <Card style={styles.fieldCard}>
+      <View style={styles.fieldCardHeader}>
+        <View style={[styles.fieldIconWrap, { backgroundColor: "rgba(245,158,11,0.15)" }]}>
+          <Text style={{ fontSize: 13 }}>📝</Text>
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.fieldLabel}>{finding.rule_code || finding.finding_type}</Text>
+          <Text style={styles.fieldRef}>{formatDate(finding.recorded_at)} · {finding.severity}</Text>
+        </View>
+      </View>
+      <Text style={styles.fieldNotes}>{finding.description}</Text>
+    </Card>
+  );
+}
+
+function ProcessingView({ scanId, status, onCancel }: { scanId: string; status: string; onCancel: () => void }) {
+  const steps = [
+    { key: "upload", label: "Image Uploaded", done: true },
+    { key: "extract", label: "Extracting Label & Compliance", done: status !== "pending" && status !== "processing", active: status === "pending" || status === "processing" },
+    { key: "result", label: "Preparing Result", done: false, active: false },
+  ];
+  return (
+    <View style={styles.processingContainer}>
+      <SafeAreaView edges={["top"]} style={{ width: "100%" }}>
+        <View style={styles.processingTopBar}>
+          <Text style={styles.processingBrand}>LegalM</Text>
+          <TouchableOpacity onPress={onCancel}><Text style={styles.processingCancel}>✕ Cancel</Text></TouchableOpacity>
+        </View>
+      </SafeAreaView>
+      <View style={styles.processingHero}>
+        <ActivityIndicator size="large" color={Colors.secondary} />
+      </View>
+      <Text style={styles.processingTitle}>Analyzing Product…</Text>
+      <Text style={styles.processingScanId}>Scan ID: {scanId?.slice(0, 12)}</Text>
+
+      <View style={styles.processingSteps}>
+        {steps.map((s, i) => (
+          <View key={s.key} style={styles.processingStepRow}>
+            <View style={[
+              styles.processingDot,
+              s.done && { backgroundColor: Colors.statusPass },
+              s.active && { backgroundColor: Colors.secondary },
+            ]}>
+              <Text style={styles.processingDotText}>{s.done ? "✓" : s.active ? "⟳" : ""}</Text>
+            </View>
+            {i < steps.length - 1 && <View style={[styles.processingLine, s.done && { backgroundColor: Colors.statusPass }]} />}
+            <Text style={[styles.processingStepLabel, (s.done || s.active) && { color: Colors.onSurface, fontWeight: "700" }]}>{s.label}</Text>
+          </View>
+        ))}
+      </View>
+      <Text style={styles.processingFooter}>🔒 Sent to the existing LegalM OCR & compliance pipeline. This usually takes 5–20 seconds.</Text>
+    </View>
+  );
+}
+
+function EvidenceViewer({ visible, onClose, imageUrl, field }: {
+  visible: boolean; onClose: () => void; imageUrl?: string; field: FieldTabEntry | null;
+}) {
+  const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
+
+  useEffect(() => {
+    if (!imageUrl || !visible) return;
+    setImgSize(null);
+    Image.getSize(imageUrl, (w, h) => setImgSize({ w, h }), () => setImgSize({ w: 1, h: 1 }));
+  }, [imageUrl, visible]);
+
+  if (!imageUrl) return null;
+
+  const displayW = SCREEN_W;
+  const displayH = imgSize ? (imgSize.h / imgSize.w) * displayW : displayW;
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.viewerOverlay}>
+        <SafeAreaView style={{ flex: 1 }}>
+          <TouchableOpacity style={styles.viewerClose} onPress={onClose} hitSlop={12}>
+            <Text style={styles.viewerCloseText}>✕</Text>
+          </TouchableOpacity>
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={{ minHeight: displayH }}
+            maximumZoomScale={4}
+            minimumZoomScale={1}
+            centerContent
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={{ width: displayW, height: displayH }}>
+              <Image source={{ uri: imageUrl }} style={{ width: displayW, height: displayH }} resizeMode="contain" />
+            </View>
+          </ScrollView>
+          {field?.label && (
+            <View style={styles.viewerCaption}>
+              <Text style={styles.viewerCaptionTitle}>{field.label}</Text>
+              {field.extracted_value ? <Text style={styles.viewerCaptionValue}>{field.extracted_value}</Text> : null}
+              <Text style={styles.viewerCaptionHint}>Pinch to zoom · No bounding-box evidence stored for this field — showing the source image.</Text>
+            </View>
+          )}
+        </SafeAreaView>
+      </View>
+    </Modal>
+  );
+}
+
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: Colors.background },
-  center: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 },
-  errorText: { color: Colors.danger, fontWeight: "600" },
-  topBar: {
-    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    paddingHorizontal: 16, paddingVertical: 12,
-    backgroundColor: Colors.white, borderBottomWidth: 1, borderBottomColor: Colors.border,
-  },
-  closeBtn: { padding: 4, minWidth: 40 },
-  closeBtnText: { fontSize: 16, color: Colors.textSecondary, fontWeight: "700" },
-  topTitle: { fontSize: 16, fontWeight: "700", color: Colors.text },
-  shareBtn: { backgroundColor: Colors.primary, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
-  shareBtnText: { color: Colors.white, fontSize: 13, fontWeight: "700" },
-  scroll: { padding: 16, paddingBottom: 40 },
+  container: { flex: 1, backgroundColor: Colors.background },
+  topBarSafe: { backgroundColor: Colors.white, borderBottomWidth: 1, borderBottomColor: Colors.borderSubtle },
+  topBarRow: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 12 },
+  topBarBack: { fontSize: 20, color: Colors.onSurface },
+  topBarTitle: { ...Type.headlineSm, color: Colors.onSurface },
+  topBarSubtitle: { fontSize: 11, fontFamily: "monospace", color: Colors.onSurfaceVariant, marginTop: 1 },
+  heroImage: { width: SCREEN_W, height: 260, backgroundColor: "#000" },
+  dotsRow: { position: "absolute", bottom: 10, alignSelf: "center", flexDirection: "row", gap: 6 },
+  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: "rgba(255,255,255,0.5)" },
+  dotActive: { backgroundColor: Colors.white, width: 16 },
+  zoomHint: { position: "absolute", top: 12, right: 12, backgroundColor: "rgba(0,0,0,0.55)", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12 },
+  zoomHintText: { color: Colors.white, fontSize: 11, fontWeight: "600" },
+  body: { padding: 16 },
+  statusRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  dateText: { fontSize: 12, color: Colors.onSurfaceVariant },
+  productName: { ...Type.headlineLg, color: Colors.onSurface },
+  brandName: { ...Type.bodyLg, color: Colors.onSurfaceVariant, marginTop: 2, marginBottom: 12 },
+  summaryCard: { marginTop: 14, marginBottom: 14 },
+  summaryRow: { flexDirection: "row", gap: 16 },
+  summaryScore: { alignItems: "center", gap: 6 },
+  summaryScoreLabel: { fontSize: 10, fontWeight: "700", color: Colors.onSurfaceVariant, textAlign: "center", width: 84 },
+  summaryFields: { flex: 1, gap: 8, justifyContent: "center" },
+  summaryFieldRow: {},
+  summaryFieldLabel: { fontSize: 10, fontWeight: "700", color: Colors.onSurfaceMuted, textTransform: "uppercase", letterSpacing: 0.4 },
+  summaryFieldValue: { fontSize: 13, color: Colors.onSurface, fontWeight: "600", marginTop: 1 },
+  mono: { fontFamily: "monospace" },
+  summaryFooter: { borderTopWidth: 1, borderTopColor: Colors.borderSubtle, marginTop: 14, paddingTop: 10 },
+  summaryFooterText: { fontSize: 12, color: Colors.onSurfaceVariant, fontWeight: "600" },
+  symbolsRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 },
+  symbolPill: { flexDirection: "row", alignItems: "center", gap: 5, borderWidth: 1, borderRadius: Radius.full, paddingHorizontal: 10, paddingVertical: 5 },
+  symbolPillText: { fontSize: 11, fontWeight: "700" },
+  cardHeading: { ...Type.labelCaps, fontSize: 11, color: Colors.onSurface, marginBottom: 8 },
+  barcodeInfoLine: { fontSize: 12, color: Colors.onSurfaceVariant, marginTop: 4 },
+  tabBar: { flexDirection: "row", gap: 6, marginBottom: 14, flexWrap: "wrap" },
+  tabBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: Radius.full, backgroundColor: Colors.surfaceContainerLow, borderWidth: 1, borderColor: Colors.borderSubtle },
+  tabBtnActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  tabBtnText: { fontSize: 11.5, fontWeight: "700", color: Colors.onSurfaceVariant },
+  tabBtnTextActive: { color: Colors.onPrimary },
+  fieldCard: { marginBottom: 10 },
+  fieldCardHeader: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  fieldIconWrap: { width: 26, height: 26, borderRadius: 13, alignItems: "center", justifyContent: "center" },
+  fieldLabel: { fontSize: 13.5, fontWeight: "700", color: Colors.onSurface },
+  fieldRef: { fontSize: 10.5, color: Colors.onSurfaceMuted, marginTop: 2 },
+  fieldBody: { marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: Colors.borderSubtle },
+  fieldValueRow: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
+  fieldValueLabel: { fontSize: 11, color: Colors.onSurfaceMuted, fontWeight: "700" },
+  fieldValueText: { fontSize: 12.5, color: Colors.onSurface, flex: 1, textAlign: "right" },
+  fieldNotes: { fontSize: 12, color: Colors.onSurfaceVariant, marginTop: 8, lineHeight: 17 },
+  evidenceBtn: { marginTop: 10, alignSelf: "flex-start", borderWidth: 1.5, borderColor: Colors.secondary, borderRadius: Radius.DEFAULT, paddingHorizontal: 12, paddingVertical: 7 },
+  evidenceBtnText: { fontSize: 12, fontWeight: "700", color: Colors.secondary },
+  addFindingBtn: { borderWidth: 1.5, borderColor: Colors.primary, borderStyle: "dashed", borderRadius: Radius.DEFAULT, paddingVertical: 12, alignItems: "center", marginBottom: 12 },
+  addFindingBtnText: { color: Colors.primary, fontWeight: "700", fontSize: 13 },
+  actionsSection: { marginTop: 10, marginBottom: 16 },
+  reportRow: { flexDirection: "row", gap: 10 },
+  reportBtn: { flex: 1, borderWidth: 1.5, borderColor: Colors.borderSubtle, borderRadius: Radius.DEFAULT, paddingVertical: 12, alignItems: "center", backgroundColor: Colors.white },
+  reportBtnText: { fontSize: 13, fontWeight: "700", color: Colors.onSurface },
+  reportHistoryNote: { fontSize: 11, color: Colors.onSurfaceMuted, marginTop: 8 },
+  scanAnotherBtn: { backgroundColor: Colors.primary, paddingVertical: 15, borderRadius: Radius.md, alignItems: "center", marginTop: 6 },
+  scanAnotherText: { color: Colors.onPrimary, fontSize: 15, fontWeight: "700" },
 
-  // Status card
-  statusCard: { borderRadius: 16, padding: 20, marginBottom: 12, gap: 12 },
-  statusCardPass: { backgroundColor: Colors.successLight },
-  statusCardFail: { backgroundColor: Colors.dangerLight },
-  scoreBarWrap: { gap: 5 },
-  scoreBarBg: { height: 8, backgroundColor: "rgba(0,0,0,0.1)", borderRadius: 4, overflow: "hidden" },
-  scoreBarFill: { height: "100%", borderRadius: 4 },
-  scoreBarPass: { backgroundColor: Colors.success },
-  scoreBarFail: { backgroundColor: Colors.danger },
-  scoreBarLabel: { fontSize: 11, color: Colors.textSecondary, fontWeight: "500" },
-  symbolRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-  symbolPill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, borderWidth: 1 },
-  symbolPillGreen: { backgroundColor: "#e8f5e9", borderColor: "#81c784" },
-  symbolPillRed: { backgroundColor: "#fdecea", borderColor: "#ef9a9a" },
-  symbolPillOrange: { backgroundColor: "#fff3e0", borderColor: "#ffcc80" },
-  symbolPillGray: { backgroundColor: "#f5f5f5", borderColor: "#e0e0e0" },
-  symbolText: { fontSize: 11, fontWeight: "600", color: Colors.text },
-  reviewBadge: { backgroundColor: "#fff8e1", borderRadius: 8, padding: 8, borderWidth: 1, borderColor: "#ffe082" },
-  reviewBadgeText: { fontSize: 12, fontWeight: "700", color: "#f57f17", textAlign: "center" },
+  processingContainer: { flex: 1, backgroundColor: Colors.background, alignItems: "center", paddingTop: 0 },
+  processingTopBar: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 16, paddingVertical: 12, width: "100%" },
+  processingBrand: { fontSize: 16, fontWeight: "800", color: Colors.onSurface },
+  processingCancel: { fontSize: 13, color: Colors.onSurfaceVariant, fontWeight: "600" },
+  processingHero: { width: 96, height: 96, borderRadius: 48, backgroundColor: Colors.surfaceContainerHigh, alignItems: "center", justifyContent: "center", marginTop: 40, marginBottom: 20 },
+  processingTitle: { ...Type.headlineMd, color: Colors.onSurface },
+  processingScanId: { fontSize: 11, fontFamily: "monospace", color: Colors.secondary, marginTop: 4, marginBottom: 28 },
+  processingSteps: { width: "100%", paddingHorizontal: 32 },
+  processingStepRow: { flexDirection: "row", alignItems: "center", position: "relative", paddingBottom: 28 },
+  processingDot: { width: 28, height: 28, borderRadius: 14, backgroundColor: Colors.surfaceContainerHigh, alignItems: "center", justifyContent: "center", marginRight: 14, zIndex: 2 },
+  processingDotText: { color: Colors.white, fontSize: 12, fontWeight: "800" },
+  processingLine: { position: "absolute", left: 13, top: 28, width: 2, height: 28, backgroundColor: Colors.outlineVariant },
+  processingStepLabel: { fontSize: 13.5, color: Colors.onSurfaceMuted, fontWeight: "600" },
+  processingFooter: { position: "absolute", bottom: 32, left: 32, right: 32, textAlign: "center", fontSize: 11, color: Colors.onSurfaceMuted, lineHeight: 16 },
 
-  // Remarks
-  remarksCard: {
-    backgroundColor: Colors.white, borderRadius: 12, padding: 16, marginBottom: 12,
-    borderLeftWidth: 4, borderLeftColor: Colors.primary,
-  },
-  sectionLabel: { fontSize: 11, fontWeight: "700", color: Colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 },
-  remarksText: { fontSize: 13, color: Colors.text, lineHeight: 20 },
+  viewerOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.92)" },
+  viewerClose: { alignSelf: "flex-end", padding: 16, zIndex: 5 },
+  viewerCloseText: { color: Colors.white, fontSize: 22 },
+  viewerCaption: { padding: 16, backgroundColor: "rgba(0,0,0,0.6)" },
+  viewerCaptionTitle: { color: Colors.white, fontSize: 14, fontWeight: "700" },
+  viewerCaptionValue: { color: "rgba(255,255,255,0.85)", fontSize: 13, marginTop: 3 },
+  viewerCaptionHint: { color: "rgba(255,255,255,0.5)", fontSize: 10.5, marginTop: 6 },
 
-  // Meta
-  metaCard: { backgroundColor: Colors.white, borderRadius: 12, padding: 16, marginBottom: 12, gap: 8 },
-  metaRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  metaKey: { fontSize: 12, color: Colors.textSecondary },
-  metaVal: { fontSize: 12, color: Colors.text, fontWeight: "600" },
-
-  // Intelligence card
-  intelligenceCard: {
-    backgroundColor: Colors.white, borderRadius: 12, padding: 16, marginBottom: 12,
-  },
-  intelRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  intelIcon: { fontSize: 20 },
-  intelTitle: { fontSize: 13, fontWeight: "700", color: Colors.text },
-  intelSub: { fontSize: 11, color: Colors.textSecondary, marginTop: 1 },
-  intelBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
-  intelBadgeOn: { backgroundColor: "#e8f5e9" },
-  intelBadgeOff: { backgroundColor: "#f5f5f5" },
-  intelBadgeText: { fontSize: 11, fontWeight: "700" },
-  intelBadgeTextOn: { color: "#2e7d32" },
-  intelBadgeTextOff: { color: "#9e9e9e" },
-  barcodeList: { marginTop: 10, gap: 6 },
-  barcodeRow: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: Colors.offWhite, padding: 8, borderRadius: 6 },
-  barcodeTypeBadge: { backgroundColor: Colors.primaryLight, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  barcodeTypeText: { fontSize: 10, fontWeight: "700", color: Colors.primary },
-  barcodeValue: { flex: 1, fontSize: 12, fontFamily: "monospace", color: Colors.text },
-  barcodePrimary: { fontSize: 10, color: Colors.textSecondary, fontWeight: "600" },
-  offCard: { backgroundColor: "#e3f2fd", padding: 10, borderRadius: 6, marginTop: 6, gap: 4 },
-  offTitle: { fontSize: 11, fontWeight: "700", color: "#1565c0", marginBottom: 2 },
-  offRow: { flexDirection: "row", gap: 8 },
-  offKey: { fontSize: 10, color: "#1976d2", fontWeight: "600", width: 60 },
-  offVal: { flex: 1, fontSize: 11, color: Colors.text },
-
-  // Four-tab section
-  tabSection: { backgroundColor: Colors.white, borderRadius: 12, marginBottom: 12, overflow: "hidden" },
-  tabBar: { borderBottomWidth: 1, borderBottomColor: Colors.border },
-  tabBarContent: { flexDirection: "row", paddingHorizontal: 4 },
-  tabBtn: {
-    flexDirection: "row", alignItems: "center", gap: 5,
-    paddingHorizontal: 14, paddingVertical: 12,
-    borderBottomWidth: 2, borderBottomColor: "transparent",
-  },
-  tabBtnActive: { borderBottomColor: Colors.primary },
-  tabBtnText: { fontSize: 13, fontWeight: "600", color: Colors.textSecondary },
-  tabBtnTextActive: { color: Colors.primary },
-  tabBadge: { backgroundColor: Colors.offWhite, borderRadius: 10, paddingHorizontal: 6, paddingVertical: 1 },
-  tabBadgeActive: { backgroundColor: Colors.primary },
-  tabBadgeText: { fontSize: 10, fontWeight: "700", color: Colors.textSecondary },
-  tabBadgeTextActive: { color: Colors.white },
-  tabLoading: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, padding: 20 },
-  tabLoadingText: { fontSize: 12, color: Colors.textMuted },
-
-  // Empty state
-  emptyTab: { padding: 32, alignItems: "center", gap: 8 },
-  emptyTabIcon: { fontSize: 36 },
-  emptyTabText: { fontSize: 13, color: Colors.textMuted, textAlign: "center" },
-
-  // Violations tab
-  violationHeader: { backgroundColor: "#fdecea", padding: 14, borderBottomWidth: 1, borderBottomColor: "#f5c6cb" },
-  violationHeaderText: { fontSize: 13, fontWeight: "700", color: Colors.danger },
-  violationHeaderSub: { fontSize: 11, color: Colors.textSecondary, marginTop: 2 },
-  violationRow: {
-    flexDirection: "row", alignItems: "flex-start", gap: 10,
-    padding: 14, borderBottomWidth: 1, borderBottomColor: Colors.border,
-  },
-  violationDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: Colors.danger, marginTop: 4 },
-  violationLabel: { fontSize: 13, fontWeight: "600", color: Colors.text },
-  violationRef: { fontSize: 11, color: Colors.textMuted, marginTop: 2 },
-  violationWeight: { fontSize: 11, fontWeight: "700", color: Colors.danger },
-
-  // Relaxed tab
-  relaxedRow: {
-    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
-    padding: 14, borderBottomWidth: 1, borderBottomColor: Colors.border,
-  },
-  relaxedLabel: { fontSize: 13, color: Colors.text, fontWeight: "500" },
-  relaxedNote: { fontSize: 11, color: Colors.textMuted },
-
-  // Findings tab
-  addFindingBtn: {
-    margin: 14, backgroundColor: Colors.primary,
-    paddingVertical: 10, borderRadius: 8, alignItems: "center",
-  },
-  addFindingBtnText: { color: Colors.white, fontWeight: "700", fontSize: 14 },
-  findingCard: {
-    marginHorizontal: 14, marginBottom: 10,
-    backgroundColor: Colors.offWhite, borderRadius: 10,
-    padding: 12, borderWidth: 1, borderColor: Colors.border,
-  },
-  findingHeaderRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 6, flexWrap: "wrap" },
-  severityBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, borderWidth: 1 },
-  severityText: { fontSize: 9, fontWeight: "700" },
-  findingType: { fontSize: 9, fontWeight: "700", color: Colors.textSecondary, textTransform: "uppercase" },
-  findingRuleCode: { fontSize: 9, fontWeight: "700", color: Colors.primary, fontFamily: "monospace" },
-  deleteBtn: { marginLeft: "auto" as any, padding: 4 },
-  deleteBtnText: { fontSize: 14, color: Colors.textMuted },
-  findingDesc: { fontSize: 13, color: Colors.text, lineHeight: 18 },
-  findingEvidence: { fontSize: 11, color: Colors.textMuted, marginTop: 4, fontStyle: "italic" },
-
-  // OCR
-  ocrToggle: {
-    backgroundColor: Colors.white, padding: 12, borderRadius: 8,
-    alignItems: "center", marginBottom: 8, borderWidth: 1, borderColor: Colors.border,
-  },
-  ocrToggleText: { fontSize: 13, color: Colors.primary, fontWeight: "600" },
-  ocrBox: { backgroundColor: "#1e1e2e", borderRadius: 8, padding: 14, marginBottom: 16 },
-  ocrText: { fontSize: 11, color: "#a8d8a8", fontFamily: "monospace", lineHeight: 18 },
-
-  // New scan
-  newScanBtn: {
-    backgroundColor: Colors.primary, paddingVertical: 16,
-    borderRadius: 12, alignItems: "center", elevation: 2,
-  },
-  newScanBtnText: { color: Colors.white, fontSize: 15, fontWeight: "700" },
-
-  // Evidence
-  evidenceCard: {
-    backgroundColor: Colors.white, borderRadius: 12, padding: 16,
-    marginBottom: 16, borderWidth: 1, borderColor: Colors.border,
-  },
-  evidenceRow: {
-    backgroundColor: Colors.offWhite, borderRadius: 8, padding: 10,
-    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    borderWidth: 1, borderColor: Colors.border,
-  },
-  evidenceField: { fontSize: 11, fontWeight: "700", color: Colors.textSecondary, letterSpacing: 0.5 },
-  evidenceText: { fontSize: 13, fontWeight: "600", color: Colors.text, marginTop: 2 },
-  evidenceMeta: { fontSize: 10, color: Colors.textMuted, marginTop: 3, fontStyle: "italic" },
-  confPill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
-  confPillText: { fontSize: 12, fontWeight: "800" },
-
-  // Modal
-  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
-  modalSheet: {
-    backgroundColor: Colors.white, borderTopLeftRadius: 20, borderTopRightRadius: 20,
-    padding: 20, maxHeight: "85%",
-  },
-  modalTitle: { fontSize: 17, fontWeight: "700", color: Colors.text, marginBottom: 16, textAlign: "center" },
-  fieldLabel: { fontSize: 11, fontWeight: "700", color: Colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6, marginTop: 12 },
-  modalInput: {
-    borderWidth: 1.5, borderColor: Colors.border, borderRadius: 8,
-    paddingHorizontal: 12, paddingVertical: 10,
-    fontSize: 14, color: Colors.text, backgroundColor: Colors.offWhite,
-  },
-  modalTextarea: { height: 80, textAlignVertical: "top" },
-  segmentRow: { flexDirection: "row", gap: 6, flexWrap: "wrap" },
-  segmentBtn: {
-    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8,
-    borderWidth: 1.5, borderColor: Colors.border, backgroundColor: Colors.white,
-  },
-  segmentBtnActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
-  segmentBtnText: { fontSize: 12, fontWeight: "600", color: Colors.textSecondary, textTransform: "capitalize" },
-  segmentBtnTextActive: { color: Colors.white },
-  modalActions: { flexDirection: "row", gap: 10, marginTop: 20 },
-  modalCancelBtn: {
-    flex: 1, paddingVertical: 12, borderRadius: 8,
-    borderWidth: 1.5, borderColor: Colors.border, alignItems: "center",
-  },
-  modalCancelText: { fontSize: 14, fontWeight: "600", color: Colors.textSecondary },
-  modalSaveBtn: { flex: 2, paddingVertical: 12, borderRadius: 8, backgroundColor: Colors.primary, alignItems: "center" },
-  modalSaveText: { fontSize: 14, fontWeight: "700", color: Colors.white },
+  findingOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", alignItems: "center", justifyContent: "center", padding: 24 },
+  findingCard: { backgroundColor: Colors.white, borderRadius: Radius.lg, padding: 20, width: "100%" },
+  findingTitle: { ...Type.headlineSm, color: Colors.onSurface, marginBottom: 12 },
+  findingInput: { borderWidth: 1.5, borderColor: Colors.borderSubtle, borderRadius: Radius.DEFAULT, padding: 12, fontSize: 13, color: Colors.onSurface, minHeight: 90, textAlignVertical: "top", marginBottom: 16 },
+  findingActions: { flexDirection: "row", gap: 10, justifyContent: "flex-end" },
+  findingCancel: { paddingHorizontal: 16, paddingVertical: 10 },
+  findingCancelText: { color: Colors.onSurfaceVariant, fontWeight: "600" },
+  findingSubmit: { backgroundColor: Colors.primary, paddingHorizontal: 18, paddingVertical: 10, borderRadius: Radius.DEFAULT, minWidth: 72, alignItems: "center" },
+  findingSubmitText: { color: Colors.onPrimary, fontWeight: "700" },
 });

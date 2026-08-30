@@ -1,13 +1,19 @@
-import GovTopBar from "@/components/GovTopBar";
+import LmSidebar from "@/components/LmSidebar";
+import LmTopBar from "@/components/LmTopBar";
 
 export default function ProductsLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-gray-50">
-      <GovTopBar />
-      <main className="max-w-screen-xl mx-auto px-4 py-6">{children}</main>
-      <footer className="border-t border-gray-200 mt-12 py-4 text-center text-xs text-gray-400">
-        Legal Metrology (Packaged Commodities) Rules, 2011 · Ministry of Consumer Affairs · NIC
-      </footer>
+    <div className="bg-background text-on-surface font-body-md min-h-screen w-full flex">
+      <LmSidebar />
+      <main className="flex-1 md:ml-64 flex flex-col min-h-screen bg-bg-offset">
+        <LmTopBar title="Products" />
+        <div className="flex-1 p-margin-mobile md:p-margin-desktop">
+          <div className="max-w-container-max mx-auto space-y-gutter">{children}</div>
+        </div>
+        <footer className="border-t border-outline-variant py-4 text-center text-label-caps text-on-surface-variant">
+          Legal Metrology (Packaged Commodities) Rules, 2011 · Ministry of Consumer Affairs · NIC
+        </footer>
+      </main>
     </div>
   );
 }

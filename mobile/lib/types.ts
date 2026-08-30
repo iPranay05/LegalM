@@ -1,27 +1,70 @@
-export interface ComplianceResult {
+// Mirrors web/lib/types.ts — same LegalM backend, same shapes. Kept in sync by
+// hand since the mobile app and web app call the exact same REST API.
+
+export interface User {
+  id: number;
+  name: string;
+  email: string;
+  role: "Inspector" | "Controller" | "Analyst" | "ManufacturerSelfCheck" | string;
+  district?: string;
+  state?: string;
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────
+export interface DashboardStats {
+  total_scans: number;
+  compliant_count: number;
+  non_compliant_count: number;
+  compliance_rate: number;
+  avg_compliance_score: number;
+  scans_today: number;
+  scans_this_week: number;
+  pending_reviews: number;
+  top_missing_fields: { field: string; count: number }[];
+  trend: { date: string; total: number; compliant: number }[];
+  recent_scans: Scan[];
+}
+
+export interface TopViolation {
+  rule_code: string;
+  count: number;
+}
+
+// ── Scan ───────────────────────────────────────────────────────────────────
+export interface Scan {
+  id: number;
   scan_id: string;
-  is_compliant: boolean;
-  compliance_score: number;
-  field_results: Record<string, boolean>;
-  missing_fields: string[];
-  extracted_fields: Record<string, string>;
+  product_name?: string;
+  brand_name?: string;
+  category?: string;
+  commodity_category_id?: number;
+  shop_name?: string;
+  location?: string;
+  state?: string;
+  district?: string;
+  raw_ocr_text?: string;
+  ocr_confidence?: number;
+  image_path?: string;
+  image_paths?: string[];
+  bounding_boxes?: BoundingBox[];
+  pipeline_status?: "pending" | "processing" | "complete" | "review_needed" | "failed" | string;
+  review_status?: string;
+  calibration_method?: string;
+  symbols_detected?: SymbolResult;
+  is_compliant?: boolean;
+  compliance_headline?: ComplianceHeadline;
+  compliance_score?: number;
+  field_results?: Record<string, boolean>;
+  missing_fields?: string[];
+  extracted_fields?: Record<string, string>;
   compliance_checks?: ComplianceCheck[];
   compliance_summary?: ComplianceSummary;
-  remarks: string;
-  total_fields_checked: number;
-  mandatory_fields_present: number;
-  total_mandatory_fields: number;
-  ocr_confidence: number;
-  raw_ocr_text: string;
-  // Extended pipeline fields
-  pipeline_status?: string;
-  bounding_boxes?: BoundingBox[];
-  symbols_detected?: SymbolResult;
-  calibration_method?: string;
-  calibration_data?: Record<string, unknown>;
-  // Barcode + Groq
-  groq_used?: boolean;
+  remarks?: string;
+  created_at: string;
+  inspector_id?: number;
+  product_id?: number;
   barcode_data?: BarcodeData;
+  groq_used?: boolean;
 }
 
 export interface BarcodeData {
@@ -31,12 +74,38 @@ export interface BarcodeData {
   decoded: boolean;
 }
 
+export type ComplianceCheckResultValue =
+  | "Pass" | "Fail" | "NotApplicable" | "Relaxed" | "ManualReviewRequired";
+
+export type ComplianceHeadline = "AllPass" | "HasFailures" | "NeedsManualReview";
+
+export interface ComplianceCheck {
+  id?: number;
+  scan_id?: string;
+  rule_id?: number;
+  field_key: string;
+  result: ComplianceCheckResultValue;
+  confidence?: number;
+  extracted_value?: string;
+  relaxation_order_id?: number;
+  notes?: string;
+  evaluated_at?: string;
+}
+
+export interface ComplianceSummary {
+  headline: ComplianceHeadline;
+  counts: Record<ComplianceCheckResultValue, number>;
+  total: number;
+}
+
 export interface BoundingBox {
   field: string;
+  image_index?: number;
   text?: string;
   confidence: number;
   confirmed: boolean;
-  bbox?: number[] | null;
+  bbox?: number[] | { x_min: number; y_min: number; x_max: number; y_max: number } | null;
+  bbox_source?: string;
 }
 
 export interface SymbolResult {
@@ -45,6 +114,8 @@ export interface SymbolResult {
   gm_mark: boolean;
   veg_confidence?: number;
   non_veg_confidence?: number;
+  method?: string;
+  skip_reason?: string;
   tamper_detection?: { status: string; signals?: string[]; confidence?: number };
 }
 
@@ -76,60 +147,64 @@ export interface FieldTabEntry {
   present: boolean;
   extracted_value?: string;
   legal_reference?: string;
+  result?: ComplianceCheckResultValue;
+  notes?: string;
 }
 
-export interface Scan {
-  id: number;
+export interface ScanStatus {
   scan_id: string;
-  product_name?: string;
-  category?: string;
-  shop_name?: string;
-  location?: string;
+  pipeline_status: string;
+  review_status: string;
+}
+
+// ── Products & Manufacturers ─────────────────────────────────────────────
+export interface Manufacturer {
+  id: number;
+  name: string;
+  registration_number?: string;
+  address?: string;
+  city?: string;
   state?: string;
-  district?: string;
-  is_compliant?: boolean;
-  compliance_score?: number;
-  missing_fields?: string[];
-  extracted_fields?: Record<string, string>;
-  compliance_checks?: ComplianceCheck[];
-  compliance_summary?: ComplianceSummary;
-  remarks?: string;
-  pipeline_status?: string;
-  review_status?: string;
+  pincode?: string;
+  contact_email?: string;
+  contact_phone?: string;
+  is_importer: boolean;
+  country_of_origin?: string;
+  is_active: boolean;
   created_at: string;
 }
 
-export type ComplianceCheckResultValue =
-  | "Pass"
-  | "Fail"
-  | "NotApplicable"
-  | "Relaxed"
-  | "ManualReviewRequired";
-
-export type ComplianceHeadline =
-  | "AllPass"
-  | "HasFailures"
-  | "NeedsManualReview";
-
-export interface ComplianceCheck {
-  id?: number;
-  scan_id?: string;
-  rule_id?: number;
-  field_key: string;
-  result: ComplianceCheckResultValue;
-  confidence?: number;
-  extracted_value?: string;
-  relaxation_order_id?: number;
-  notes?: string;
-  evaluated_at?: string;
+export interface Product {
+  id: number;
+  name: string;
+  brand_name?: string;
+  category?: string;
+  commodity_category_id?: number;
+  sku?: string;
+  barcode?: string;
+  description?: string;
+  manufacturer_id?: number;
+  manufacturer?: Manufacturer;
+  is_compliant?: boolean;
+  last_compliance_score?: number;
+  last_scan_id?: string;
+  registered_by_manufacturer: boolean;
+  is_active: boolean;
+  created_at: string;
 }
 
-export interface ComplianceSummary {
-  headline: ComplianceHeadline;
-  counts: Record<ComplianceCheckResultValue, number>;
-  total: number;
+// ── Reports ────────────────────────────────────────────────────────────────
+export interface Report {
+  id: number;
+  report_id: string;
+  scan_id: string;
+  format: string;
+  file_hash_sha256: string;
+  generated_at: string;
+  superseded_by_report_id?: string;
 }
 
+// ── Shared constants ─────────────────────────────────────────────────────
 export const PRODUCT_CATEGORIES = [
   { label: "General", value: "general" },
   { label: "Food & Beverage", value: "food" },
@@ -140,22 +215,22 @@ export const PRODUCT_CATEGORIES = [
 ];
 
 export const FIELD_LABELS: Record<string, string> = {
-  manufacturer_info: "Manufacturer Info",
+  manufacturer_info: "Manufacturer / Packer Info",
   product_name: "Product Name",
   net_quantity: "Net Quantity",
-  mfg_date: "Mfg. Date",
+  mfg_date: "Mfg. / Packing Date",
   expiry_date: "Best Before / Expiry",
   mrp: "MRP",
-  consumer_care: "Consumer Care",
+  consumer_care: "Consumer Care Contact",
   country_of_origin: "Country of Origin",
-  fssai_number: "FSSAI Number",
-  food_type_marking: "Food Type Marking",
+  fssai_number: "FSSAI Licence No.",
+  food_type_marking: "Food Type Marking (Veg/Non-Veg)",
   gm_declaration: "GM Declaration",
 };
 
 export const SEVERITY_COLORS: Record<string, string> = {
-  critical: "#c0392b",
+  critical: "#ba1a1a",
   high: "#e67e22",
-  medium: "#f39c12",
-  low: "#27ae60",
+  medium: "#f59e0b",
+  low: "#10b981",
 };
