@@ -42,7 +42,8 @@ RUN addgroup --system --gid 1001 nodejs \
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 # Copy static assets (CSS, JS chunks, images)
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-# Copy public folder (favicon, icons, etc.)
+# Copy public folder — create it first so the COPY never fails on an empty dir
+RUN mkdir -p ./public
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
 USER nextjs
