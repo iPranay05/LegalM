@@ -3,8 +3,8 @@
 # Dashboard → New → Blueprint → connect repo → this file is auto-detected.
 #
 # Services deployed:
-#   1. postgres        — managed PostgreSQL 16 database
-#   2. redis           — managed Redis 7 cache / Celery broker
+#   1. legalm-db       — managed PostgreSQL 16 database
+#   2. legalm-redis    — managed Redis (Celery broker + result backend)
 #   3. legalm-backend  — FastAPI app (Docker)
 #   4. legalm-worker   — Celery background worker (Docker)
 #   5. legalm-web      — Next.js dashboard (Docker)
@@ -13,16 +13,25 @@ databases:
   - name: legalm-db
     databaseName: legalm
     user: legalm
-    plan: free           # upgrade to starter ($7/mo) for persistent storage
-    region: singapore    # change to: oregon | frankfurt | ohio | virginia
+    plan: free
+    region: singapore
+    # Free tier requires an explicit IP allow list.
+    # 0.0.0.0/0 allows all — sufficient for internal Render service connections.
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: Allow all (Render internal + external)
 
 services:
-  # ── Managed Redis ─────────────────────────────────────────────────────────
+  # ── Managed Redis ──────────────────────────────────────────────────────────
   - type: redis
     name: legalm-redis
     plan: free
     region: singapore
     maxmemoryPolicy: allkeys-lru
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: Allow all
+
   # ── FastAPI Backend ────────────────────────────────────────────────────────
   - type: web
     name: legalm-backend
@@ -32,6 +41,10 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
+    # NOTE: Disks are not available on the free tier.
+    # Uploaded images and reports will be stored in /tmp (ephemeral).
+    # They will be lost on redeploy — acceptable for demo/hackathon use.
+    # Upgrade to the Starter plan ($7/mo) and re-add the disk block to persist files.
     envVars:
       - key: ENVIRONMENT
         value: production
@@ -46,15 +59,13 @@ services:
       - key: ACCESS_TOKEN_EXPIRE_MINUTES
         value: "1440"
       - key: UPLOAD_DIR
-        value: uploads
+        value: /tmp/uploads
 
-      # Injected automatically from the managed database above
       - key: DATABASE_URL
         fromDatabase:
           name: legalm-db
           property: connectionString
 
-      # Injected automatically from the managed Redis above
       - key: CELERY_BROKER_URL
         fromService:
           name: legalm-redis
@@ -66,21 +77,14 @@ services:
           type: redis
           property: connectionString
 
-      # Secrets — set these manually in the Render dashboard after first deploy
       - key: SECRET_KEY
-        generateValue: true   # Render auto-generates a secure random value
+        generateValue: true
 
       - key: GROQ_API_KEY
-        sync: false           # You will paste this in the dashboard
+        sync: false
 
-      # CORS — will be updated after web service gets its URL
       - key: CORS_ORIGINS
         value: https://legalm-web.onrender.com
-
-    disk:
-      name: uploads
-      mountPath: /app/uploads
-      sizeGB: 1
 
   # ── Celery Worker ──────────────────────────────────────────────────────────
   - type: worker
@@ -97,7 +101,7 @@ services:
       - key: DEBUG
         value: "False"
       - key: UPLOAD_DIR
-        value: uploads
+        value: /tmp/uploads
       - key: ALGORITHM
         value: HS256
 
@@ -129,12 +133,7 @@ services:
           type: web
           envVarKey: GROQ_API_KEY
 
-    disk:
-      name: worker-uploads
-      mountPath: /app/uploads
-      sizeGB: 1
-
-  # ── Next.js Web Dashboard ─────────────────────────────────────────────────
+  # ── Next.js Web Dashboard ──────────────────────────────────────────────────
   - type: web
     name: legalm-web
     region: singapore
@@ -146,15 +145,9 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      # NEXT_PUBLIC_API_URL must be set at BUILD TIME (Next.js bakes it into
-      # the static bundle). Because Render resolves fromService references at
-      # runtime, this value must be entered manually in the dashboard after
-      # the backend service is created.
-      #
-      # Steps after first deploy:
-      #   1. Copy the legalm-backend public URL from its dashboard page
-      #      e.g. https://legalm-backend.onrender.com
-      #   2. Set NEXT_PUBLIC_API_URL to that value on legalm-web
+      # Set this manually after legalm-backend is deployed:
+      #   1. Copy the backend URL e.g. https://legalm-backend.onrender.com
+      #   2. Paste it here in the Render dashboard → legalm-web → Environment
       #   3. Trigger a manual redeploy of legalm-web
       - key: NEXT_PUBLIC_API_URL
         sync: false
