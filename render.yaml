@@ -1,0 +1,160 @@
+# Render Blueprint — LegalM Compliance Platform
+# Deploys all services in one click from the Render dashboard.
+# Dashboard → New → Blueprint → connect repo → this file is auto-detected.
+#
+# Services deployed:
+#   1. postgres        — managed PostgreSQL 16 database
+#   2. redis           — managed Redis 7 cache / Celery broker
+#   3. legalm-backend  — FastAPI app (Docker)
+#   4. legalm-worker   — Celery background worker (Docker)
+#   5. legalm-web      — Next.js dashboard (Docker)
+
+databases:
+  - name: legalm-db
+    databaseName: legalm
+    user: legalm
+    plan: free           # upgrade to starter ($7/mo) for persistent storage
+    region: singapore    # change to: oregon | frankfurt | ohio | virginia
+
+services:
+  # ── Managed Redis ─────────────────────────────────────────────────────────
+  - type: redis
+    name: legalm-redis
+    plan: free
+    region: singapore
+    maxmemoryPolicy: allkeys-lru
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  - type: web
+    name: legalm-backend
+    region: singapore
+    plan: free
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "False"
+      - key: APP_NAME
+        value: Legal Metrology Compliance API
+      - key: APP_VERSION
+        value: "1.0.0"
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "1440"
+      - key: UPLOAD_DIR
+        value: uploads
+
+      # Injected automatically from the managed database above
+      - key: DATABASE_URL
+        fromDatabase:
+          name: legalm-db
+          property: connectionString
+
+      # Injected automatically from the managed Redis above
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: legalm-redis
+          type: redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: legalm-redis
+          type: redis
+          property: connectionString
+
+      # Secrets — set these manually in the Render dashboard after first deploy
+      - key: SECRET_KEY
+        generateValue: true   # Render auto-generates a secure random value
+
+      - key: GROQ_API_KEY
+        sync: false           # You will paste this in the dashboard
+
+      # CORS — will be updated after web service gets its URL
+      - key: CORS_ORIGINS
+        value: https://legalm-web.onrender.com
+
+    disk:
+      name: uploads
+      mountPath: /app/uploads
+      sizeGB: 1
+
+  # ── Celery Worker ──────────────────────────────────────────────────────────
+  - type: worker
+    name: legalm-worker
+    region: singapore
+    plan: free
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: celery -A app.services.pipeline_service.celery_app worker --loglevel=info --concurrency=2
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "False"
+      - key: UPLOAD_DIR
+        value: uploads
+      - key: ALGORITHM
+        value: HS256
+
+      - key: DATABASE_URL
+        fromDatabase:
+          name: legalm-db
+          property: connectionString
+
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: legalm-redis
+          type: redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: legalm-redis
+          type: redis
+          property: connectionString
+
+      - key: SECRET_KEY
+        fromService:
+          name: legalm-backend
+          type: web
+          envVarKey: SECRET_KEY
+
+      - key: GROQ_API_KEY
+        fromService:
+          name: legalm-backend
+          type: web
+          envVarKey: GROQ_API_KEY
+
+    disk:
+      name: worker-uploads
+      mountPath: /app/uploads
+      sizeGB: 1
+
+  # ── Next.js Web Dashboard ─────────────────────────────────────────────────
+  - type: web
+    name: legalm-web
+    region: singapore
+    plan: free
+    runtime: docker
+    dockerfilePath: ./web/Dockerfile
+    dockerContext: ./web
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # NEXT_PUBLIC_API_URL must be set at BUILD TIME (Next.js bakes it into
+      # the static bundle). Because Render resolves fromService references at
+      # runtime, this value must be entered manually in the dashboard after
+      # the backend service is created.
+      #
+      # Steps after first deploy:
+      #   1. Copy the legalm-backend public URL from its dashboard page
+      #      e.g. https://legalm-backend.onrender.com
+      #   2. Set NEXT_PUBLIC_API_URL to that value on legalm-web
+      #   3. Trigger a manual redeploy of legalm-web
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
