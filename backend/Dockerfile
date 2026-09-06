@@ -25,4 +25,5 @@ RUN chmod +x start.sh
 EXPOSE 8000
 
 # start.sh: runs migrations → seeds → starts celery worker → starts uvicorn
+# Updated: force cache bust
 CMD ["./start.sh"]
