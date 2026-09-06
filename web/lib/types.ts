@@ -48,7 +48,17 @@ export interface Scan {
   bounding_boxes?: BoundingBox[];
   pipeline_status?: string;
   calibration_method?: string;
-  calibration_data?: Record<string, unknown>;
+  calibration_data?: {
+    verified?: boolean;
+    method?: string;
+    reference?: string;
+    reference_width_px?: number;
+    mm_per_px_x?: number;
+    mm_per_px_y?: number;
+    confidence?: number;
+    reason?: string;
+    [key: string]: unknown;
+  };
   symbols_detected?: SymbolResult;
   is_compliant?: boolean;
   compliance_headline?: "AllPass" | "HasFailures" | "NeedsManualReview";
