@@ -5,34 +5,42 @@ set -e
 
 echo "==> Running database migrations..."
 
-# If the alembic_version table does not exist yet the DB is either brand-new
-# (run upgrade head normally) or was created outside of Alembic (stamp first
-# so Alembic knows the schema is already at baseline, then upgrade to head).
+# Detect the state of the database and handle all three cases:
+#   1. Brand-new DB (no tables)         → run full upgrade head normally
+#   2. Existing schema, no alembic_version → stamp to head, skip all migrations
+#   3. Existing schema, has alembic_version → upgrade head normally (idempotent)
 python - <<'PYEOF'
 import sys
 from sqlalchemy import create_engine, inspect, text
 from app.config import settings
 
 engine = create_engine(settings.DATABASE_URL)
-with engine.connect() as conn:
-    tables = inspect(engine).get_table_names()
-    has_alembic = "alembic_version" in tables
-    has_tables  = "manufacturers" in tables   # proxy for "schema already exists"
+inspector = inspect(engine)
+tables = inspector.get_table_names()
 
-    if has_tables and not has_alembic:
-        print("Schema exists but no alembic_version — stamping baseline...")
+has_alembic = "alembic_version" in tables
+has_schema  = "manufacturers" in tables  # reliable proxy for "fully migrated"
+
+if has_schema and not has_alembic:
+    print("Schema exists but no alembic_version table — stamping to head...")
+    with engine.connect() as conn:
         conn.execute(text(
             "CREATE TABLE IF NOT EXISTS alembic_version "
-            "(version_num VARCHAR(32) NOT NULL, CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+            "(version_num VARCHAR(32) NOT NULL, "
+            "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
         ))
         conn.execute(text("DELETE FROM alembic_version"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0339113e0bab')"))
+        # Stamp directly to the latest revision so alembic upgrade head is a no-op
+        conn.execute(text(
+            "INSERT INTO alembic_version (version_num) "
+            "VALUES ('e5f9a2b4c6d8')"
+        ))
         conn.commit()
-        print("Stamped.")
-    elif not has_tables:
-        print("Fresh database — will run full migration.")
-    else:
-        print("Alembic version table present — proceeding normally.")
+    print("Stamped to e5f9a2b4c6d8 (head). No migrations will run.")
+elif not has_schema:
+    print("Fresh database — full migration will run.")
+else:
+    print("alembic_version present — running incremental upgrade.")
 PYEOF
 
 alembic upgrade head
