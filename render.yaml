@@ -3,11 +3,10 @@
 # Dashboard → New → Blueprint → connect repo → Apply
 #
 # Free tier limitations addressed:
-#   - No worker service type  → Celery runs inside the backend container via a
-#                               startup script that launches both uvicorn and
-#                               the Celery worker as background processes.
+#   - No worker service type  → Celery runs inside the backend container via
+#                               start.sh which launches both processes.
 #   - No persistent disks     → UPLOAD_DIR uses /tmp (ephemeral; fine for demo)
-#   - No shell access         → migrations run via preDeployCommand
+#   - No preDeployCommand     → migrations run inside start.sh on every boot
 
 databases:
   - name: legalm-db
@@ -42,12 +41,7 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
-    # Run migrations before each deploy, then start combined server+worker
-    preDeployCommand: alembic upgrade head
-    dockerCommand: >
-      sh -c "celery -A app.services.pipeline_service.celery_app worker
-      --loglevel=info --concurrency=1 --detach &&
-      uvicorn main:app --host 0.0.0.0 --port 8000"
+    # start.sh handles: migrations → seed → celery worker (bg) → uvicorn (fg)
     envVars:
       - key: ENVIRONMENT
         value: production
